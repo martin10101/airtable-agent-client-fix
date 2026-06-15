@@ -665,6 +665,10 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
         dlog(`[cfg-debug] dropped statutory-threshold swap: ${JSON.stringify(old)} -> ${JSON.stringify(next)}`);
         return false;
       }
+      if (/\b(Martin Joseph|Metropolitan Realty Exemptions)\b/i.test(old)) {
+        dlog(`[cfg-debug] dropped signature/firm swap: ${JSON.stringify(old)} -> ${JSON.stringify(next)}`);
+        return false;
+      }
       return true;
     });
   }

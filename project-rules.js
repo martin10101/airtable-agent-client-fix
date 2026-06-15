@@ -419,6 +419,13 @@ function inspectGeneratedDocxText(text, fields, facts) {
   if (/For buildings with\s+\d+\s+residential[^.]*\s+or more/i.test(body)) {
     warnings.push('Possible statutory unit threshold was replaced with the project summary.');
   }
+  if (facts && facts.units != null && facts.units < 100 && /Affordability Option B \(applicable for projects comprising 100 or more dwelling units\)/i.test(body)) {
+    warnings.push('Affordability Option B bracket is wrong for a project with fewer than 100 units.');
+  }
+  const owner = asString(getField(fields, 'Owner'));
+  if (owner && new RegExp(`Sincerely yours[\\s\\S]{0,120}${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,120}Metropolitan Realty`, 'i').test(body)) {
+    warnings.push('Signature block appears to contain the Owner instead of the firm signer.');
+  }
   if (/\[\[[^\]]+\]\]/.test(body)) {
     warnings.push('Unresolved [[...]] template marker or placeholder remains.');
   }
@@ -583,6 +590,50 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       'For buildings with 100 or more dwelling units,',
       'Restored statutory wage threshold that should not use project unit count'
     );
+  }
+
+  const badWageCore = body.match(/\d+\s+residential[^\r\n.]*?\s+or more/i);
+  if (badWageCore && /building service employees|prevailing wages/i.test(body)) {
+    add(
+      'Statutory Threshold Cleanup',
+      badWageCore[0],
+      '100 or more dwelling units',
+      'Restored short statutory wage threshold fragment'
+    );
+  }
+
+  if (facts && facts.units != null && facts.units < 100) {
+    add(
+      'Affordability Option Cleanup',
+      'Affordability Option B (applicable for projects comprising 100 or more dwelling units)',
+      'Affordability Option B (applicable for projects comprising 6 to 99 dwelling units)',
+      'Restored Option B bracket for fewer than 100 units'
+    );
+  }
+
+  const owner = asString(getField(fields, 'Owner'));
+  if (owner && new RegExp(`Sincerely yours[\\s\\S]{0,120}${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,120}Metropolitan Realty`, 'i').test(body)) {
+    add(
+      'Signature Cleanup',
+      owner,
+      'Martin Joseph',
+      'Restored firm signature; owner should not replace signer'
+    );
+  }
+
+  if (/Tax liability without 485-X benefits[\s\S]{0,500}Tax liability with 485-X benefits/i.test(body)) {
+    const taxSectionMatch = body.match(/Tax liability without 485-X benefits[\s\S]{0,900}?(?=Disclaimer|$)/i);
+    const taxSection = taxSectionMatch ? taxSectionMatch[0] : '';
+    const taxAmountRe = /\b(?:Assessed Value|Tax liability)\s+(\$[\d,]+(?:\.\d{2})?)/gi;
+    let taxMatch;
+    while ((taxMatch = taxAmountRe.exec(taxSection)) !== null) {
+      add(
+        'Tax Projection Cleanup',
+        taxMatch[1],
+        '[To be determined]',
+        'Removed old projected tax value because no Airtable tax projection field is available'
+      );
+    }
   }
 
   return swaps;
