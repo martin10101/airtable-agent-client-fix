@@ -247,7 +247,7 @@ function addParagraphProperties(paragraph, props) {
 
   const insertXml = inserts.join('');
   if (/<w:pPr\b/.test(paragraph)) {
-    return paragraph.replace(/<\/w:pPr>/, `${insertXml}</w:pPr>`);
+    return paragraph.replace(/(<w:pPr\b[^>]*>)/, `$1${insertXml}`);
   }
   return paragraph.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${insertXml}</w:pPr>`);
 }
@@ -338,12 +338,6 @@ function tidyBlankParagraphs(xml, log) {
   for (let i = 0; i < paragraphs.length; i++) {
     if (!paragraphs[i].empty) continue;
     const prev = i > 0 ? paragraphs[i - 1] : null;
-    const next = i + 1 < paragraphs.length ? paragraphs[i + 1] : null;
-    if (prev && next && prev.numbered && next.numbered) {
-      remove.add(i);
-      removed++;
-      continue;
-    }
     if (prev && prev.empty && !remove.has(i - 1)) {
       remove.add(i);
       removed++;

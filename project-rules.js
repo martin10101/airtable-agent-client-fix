@@ -298,6 +298,19 @@ function projectDetailSentence(fields, facts) {
     : `A new ${kind} will be constructed.`;
 }
 
+function aiAnswersText(fields) {
+  const raw =
+    getField(fields, 'AI Answers') ??
+    getField(fields, 'AI Answer') ??
+    getField(fields, 'AI answers') ??
+    getField(fields, 'AI answer');
+  const lines = asString(raw)
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*\d+[\).:\-\s]+/, '').trim())
+    .filter(Boolean);
+  return lines.join(' ').replace(/\s+/g, ' ').trim();
+}
+
 function permitWorkTerm(facts) {
   if (facts && facts.keepPermitScenario === 'alteration-conversion') return 'renovation';
   if (facts && facts.keepPermitScenario === 'new-building') return 'new construction';
@@ -321,6 +334,8 @@ function getFactsValue(token, fields, facts) {
     buildingdescription: projectSummary(fields, facts),
     projectdetailsentence: projectDetailSentence(fields, facts),
     constructiondescription: projectDetailSentence(fields, facts),
+    aianswers: aiAnswersText(fields),
+    aianswer: aiAnswersText(fields),
     permitworkterm: permitWorkTerm(facts),
     constructionworkterm: permitWorkTerm(facts),
     units: formatNumber(getField(fields, 'Units')),
@@ -624,6 +639,28 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     add('Quality Fix', m[0], m[1], 'Removed bad article before unit phrase');
   }
 
+  const aiAnswer = aiAnswersText(fields);
+  const newBuildingLineForAi = body.match(/A new [^\r\n.]*building[^\r\n.]*will be constructed[^\r\n.]*\./i);
+  const renovationLineForAi = body.match(/The project involves[^\r\n.]*(?:alteration|conversion|renovation)[^\r\n.]*\./i);
+  if (aiAnswer && (newBuildingLineForAi || renovationLineForAi)) {
+    const keepLine = newBuildingLineForAi || renovationLineForAi;
+    const removeLine = keepLine === newBuildingLineForAi ? renovationLineForAi : newBuildingLineForAi;
+    add(
+      'AI Answers Project Detail',
+      keepLine[0],
+      aiAnswer,
+      'Replaced project detail numbered line with Airtable AI Answers'
+    );
+    if (removeLine) {
+      add(
+        'AI Answers Project Detail',
+        removeLine[0],
+        '',
+        'Removed alternate project detail line because AI Answers supplies the combined detail'
+      );
+    }
+  }
+
   const workTerm = permitWorkTerm(facts);
   if (workTerm) {
     addMatchingText(
@@ -634,7 +671,7 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     );
   }
 
-  const desiredProjectDetail = projectDetailSentence(fields, facts);
+  const desiredProjectDetail = aiAnswer ? '' : projectDetailSentence(fields, facts);
   if (desiredProjectDetail) {
     const newBuildingLine = body.match(/A new [^\r\n.]*building[^\r\n.]*will be constructed[^\r\n.]*\./i);
     const renovationLine = body.match(/The project involves[^\r\n.]*(?:alteration|conversion|renovation)[^\r\n.]*\./i);

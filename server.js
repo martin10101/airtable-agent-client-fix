@@ -32,7 +32,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-15-permit-work-term-v12';
+const APP_VERSION = '2026-06-15-ai-answer-spacing-v13';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -113,7 +113,11 @@ function safeFilename(name) {
 }
 
 function pickOutputBaseName(fields, templateName, recordId) {
-  const preferred = fields[OUTPUT_NAME_FIELD];
+  const preferred =
+    fields[OUTPUT_NAME_FIELD] ||
+    fields['Property Address'] ||
+    fields['Address'] ||
+    fields['Project Address'];
   if (preferred) {
     const cleaned = safeFilename(preferred);
     if (cleaned) return cleaned;
