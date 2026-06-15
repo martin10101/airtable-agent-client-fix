@@ -444,6 +444,105 @@ function inspectGeneratedDocxText(text, fields, facts) {
   return warnings;
 }
 
+function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
+  opts = opts || {};
+  const log = typeof opts.log === 'function' ? opts.log : (() => {});
+  const body = String(text || '');
+  const swaps = [];
+  const add = (fieldName, oldValue, newValue, reason) => {
+    if (!oldValue || swaps.some((s) => s.oldValue === oldValue && s.newValue === newValue)) return;
+    if (!body.toLowerCase().includes(String(oldValue).toLowerCase())) return;
+    swaps.push({ fieldName, oldValue, newValue });
+    log(`[quality-fix] ${reason}: ${JSON.stringify(String(oldValue).slice(0, 120))} -> ${JSON.stringify(String(newValue).slice(0, 120))}`);
+  };
+
+  add(
+    'Quality Fix',
+    'commercial space and commercial space',
+    'commercial space',
+    'Removed duplicate commercial language'
+  );
+
+  const badArticleRe = /\ba\s+(\d+\s+residential[^\r\n.]*)/gi;
+  let m;
+  while ((m = badArticleRe.exec(body)) !== null) {
+    add('Quality Fix', m[0], m[1], 'Removed bad article before unit phrase');
+  }
+
+  if (facts && facts.deletePermitScenario === 'alteration-conversion') {
+    for (const phrase of [
+      'The project involves the proposed alteration and conversion',
+      'proposed alteration and conversion',
+      'alteration and conversion',
+      'alteration or conversion'
+    ]) {
+      if (body.toLowerCase().includes(phrase.toLowerCase())) {
+        add('Permit Type Cleanup', phrase, '', 'Removed alteration/conversion language for NB project');
+        break;
+      }
+    }
+  } else if (facts && facts.deletePermitScenario === 'new-building') {
+    for (const phrase of [
+      'A new mixed-use building will be constructed',
+      'A new residential building will be constructed',
+      'A new commercial building will be constructed',
+      'new building will be constructed',
+      'new construction'
+    ]) {
+      if (body.toLowerCase().includes(phrase.toLowerCase())) {
+        add('Permit Type Cleanup', phrase, '', 'Removed new-building language for alteration/conversion project');
+        break;
+      }
+    }
+  }
+
+  const grossSqft = getFactsValue('Residential Gross SQFT', fields, facts);
+  if (/\baggregate\s+gross square feet\b/i.test(body)) {
+    if (grossSqft) {
+      add(
+        'Gross SQFT Cleanup',
+        'aggregate gross square feet',
+        `aggregate ${grossSqft} gross square feet`,
+        'Filled missing gross-square-foot phrase'
+      );
+    } else {
+      add(
+        'Gross SQFT Cleanup',
+        'The building will aggregate gross square feet.',
+        '',
+        'Removed incomplete gross-square-foot sentence because Airtable has no value'
+      );
+      add(
+        'Gross SQFT Cleanup',
+        'The building will aggregate gross square feet',
+        '',
+        'Removed incomplete gross-square-foot sentence because Airtable has no value'
+      );
+    }
+  }
+
+  if (facts && facts.units != null) {
+    const unitRe = /\b(\d{1,4})\s+(?:residential\s+)?(?:rental\s+)?(?:apartments|units)\b/gi;
+    while ((m = unitRe.exec(body)) !== null) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n !== facts.units) {
+        const summary = projectSummary(fields, facts);
+        if (summary) add('Unit Count Cleanup', m[0], summary, 'Replaced likely old unit count');
+      }
+    }
+  }
+
+  const summary = projectSummary(fields, facts);
+  if (summary && /Property Summary:\s*[^\r\n]+/i.test(body)) {
+    const line = body.match(/Property Summary:\s*([^\r\n]+)/i);
+    if (line && /commercial space\s+and\s+commercial space/i.test(line[0])) {
+      add('Property Summary Cleanup', line[0], line[0].replace(/commercial space\s+and\s+commercial space/ig, 'commercial space'), 'Cleaned property summary duplicate');
+    }
+  }
+
+  return swaps;
+}
+
 module.exports = {
   getField,
   asString,
@@ -455,5 +554,6 @@ module.exports = {
   resolveIcapTerm,
   evaluateTemplateMarkerText,
   buildTemplatePlaceholderSwaps,
-  inspectGeneratedDocxText
+  inspectGeneratedDocxText,
+  buildPostGenerationCleanupSwaps
 };

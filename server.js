@@ -612,12 +612,20 @@ app.post('/generate', async (req, res) => {
       if (result.missed.length) {
         log('Missed swaps (old value not located in doc):', result.missed.map((s) => s.oldValue));
       }
-      const outputText = docxHandler.extractDocxText(outputPath);
+      let outputText = docxHandler.extractDocxText(outputPath);
+      const cleanupSwaps = projectRules.buildPostGenerationCleanupSwaps(outputText, fields, projectFacts, { log });
+      let cleanupResult = null;
+      if (cleanupSwaps.length) {
+        log(`Applying ${cleanupSwaps.length} post-generation cleanup swap(s)`);
+        cleanupResult = docxHandler.fillDocxSwaps(outputPath, cleanupSwaps, outputPath, { log });
+        log(`Cleanup applied ${cleanupResult.applied.length}; missed ${cleanupResult.missed.length}`);
+        outputText = docxHandler.extractDocxText(outputPath);
+      }
       const qualityWarnings = projectRules.inspectGeneratedDocxText(outputText, fields, projectFacts);
       if (qualityWarnings.length) {
         log('[WARN] Output quality warnings:', qualityWarnings);
       }
-      swapSummary = { applied: result.applied, missed: result.missed, qualityWarnings };
+      swapSummary = { applied: result.applied, missed: result.missed, cleanup: cleanupResult, qualityWarnings };
     } else if (ext === '.xlsx') {
       const workbookJson = await xlsxHandler.extractXlsxContent(templatePath);
       log(`Workbook JSON length: ${workbookJson.length} chars. Fetching table schema...`);
