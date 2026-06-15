@@ -565,6 +565,33 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   }
 
   const summary = projectSummary(fields, facts);
+  if (summary && facts && facts.units != null) {
+    const unitOnly = `${formatNumber(facts.units)} residential rental units`;
+    add(
+      'Project Summary Cleanup',
+      `${unitOnly} ${summary}`,
+      summary,
+      'Collapsed repeated unit/project summary fragment'
+    );
+    add(
+      'Project Summary Cleanup',
+      `${summary} ${summary}`,
+      summary,
+      'Collapsed repeated project summary fragment'
+    );
+    add(
+      'Project Summary Cleanup',
+      `${summary} ${summary} - modest rental project`,
+      `${summary} - modest rental project`,
+      'Collapsed repeated project summary in property summary'
+    );
+    add(
+      'Project Summary Cleanup',
+      `${summary} ${summary} – modest rental project`,
+      `${summary} – modest rental project`,
+      'Collapsed repeated project summary in property summary'
+    );
+  }
   if (summary && /Property Summary:\s*[^\r\n]+/i.test(body)) {
     const line = body.match(/Property Summary:\s*([^\r\n]+)/i);
     if (line && /commercial space\s+and\s+commercial space/i.test(line[0])) {
@@ -599,6 +626,15 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       badWageCore[0],
       '100 or more dwelling units',
       'Restored short statutory wage threshold fragment'
+    );
+  }
+  if (facts && facts.units != null) {
+    const summaryThreshold = `${projectSummary(fields, facts)} or more`;
+    add(
+      'Statutory Threshold Cleanup',
+      summaryThreshold,
+      '100 or more dwelling units',
+      'Restored statutory wage threshold fragment'
     );
   }
 
