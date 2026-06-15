@@ -456,6 +456,14 @@ function formatProjectFactsForPrompt(projectFacts) {
   if (projectFacts.commercialGrossSqft != null) {
     lines.push(`Commercial Gross SQFT: ${projectFacts.commercialGrossSqft}`);
   }
+  if (projectFacts.permitType && projectFacts.permitType.raw) {
+    lines.push(`Permit Type: ${projectFacts.permitType.raw}`);
+    if (projectFacts.keepPermitScenario === 'new-building') {
+      lines.push('Permit-scenario decision: keep new-building/new-construction language; delete alteration/conversion language.');
+    } else if (projectFacts.keepPermitScenario === 'alteration-conversion') {
+      lines.push('Permit-scenario decision: keep alteration/conversion language; delete new-building/new-construction language.');
+    }
+  }
 
   const icap = projectFacts.icap;
   if (icap && icap.isIcap) {
@@ -515,6 +523,30 @@ function addRuleBackstopSwaps(swaps, templateText, projectFacts, log) {
       } else if (projectFacts.deleteUnitSection === 'transitional') {
         if (lower.includes('transitional')) {
           addDelete('Unit Section Rule', paragraph, 'Units <= 10 so transitional language does not apply');
+        }
+      }
+    }
+  }
+
+  if (projectFacts && projectFacts.deletePermitScenario) {
+    for (const paragraph of paragraphs) {
+      const lower = paragraph.toLowerCase();
+      if (projectFacts.deletePermitScenario === 'alteration-conversion') {
+        if (
+          lower.includes('alteration') ||
+          lower.includes('conversion') ||
+          lower.includes('converted') ||
+          lower.includes('enlargement')
+        ) {
+          addDelete('Permit Type Rule', paragraph, 'Permit Type is NB/new-building');
+        }
+      } else if (projectFacts.deletePermitScenario === 'new-building') {
+        if (
+          lower.includes('new building') ||
+          lower.includes('new construction') ||
+          /a new .* building/.test(lower)
+        ) {
+          addDelete('Permit Type Rule', paragraph, 'Permit Type is alteration/conversion');
         }
       }
     }
@@ -598,7 +630,7 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
     `Call the submit_template_analysis tool with two arrays: value_swaps (literal text swaps for ` +
     `project-specific values) and configuration_claims (spans describing the OLD building configuration ` +
     `that may need rewriting from Airtable). Use PRE-DETERMINED PROJECT FACTS as binding decisions: ` +
-    `delete the wrong unit-size section, use the listed ICAP term, and keep/remove commercial language ` +
+    `delete the wrong unit-size section, delete the wrong permit scenario, use the listed ICAP term, and keep/remove commercial language ` +
     `based on Has commercial. Fill marked yellow/red targets whenever Airtable provides a matching value.`;
 
   const parsed = await callClaude(userMessage, { tool: DOCX_ANALYSIS_TOOL });
@@ -608,6 +640,22 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
     s && typeof s.oldValue === 'string' && s.oldValue.length &&
     typeof s.newValue === 'string' && s.oldValue !== s.newValue
   );
+  if (synth) {
+    swaps = swaps.filter((s) => {
+      const old = String(s.oldValue || '');
+      const next = String(s.newValue || '');
+      const genericBuildingPhrase =
+        /\bbuilding\b/i.test(old) &&
+        /\b(mixed[- ]use|residential|commercial|multiple dwelling)\b/i.test(old) &&
+        !/\d/.test(old);
+      const replacingWithUnitPhrase = next === synth && /\b(residential|commercial).*\bunits?\b|\bcommercial space\b/i.test(next);
+      if (genericBuildingPhrase && replacingWithUnitPhrase) {
+        dlog(`[cfg-debug] dropped grammar-risk swap: ${JSON.stringify(old)} -> ${JSON.stringify(next)}`);
+        return false;
+      }
+      return true;
+    });
+  }
 
   // For each configuration_claim Claude found, if it's a SHORT noun-phrase
   // summary that appears in the template AND differs from synth, force-rewrite.

@@ -96,6 +96,23 @@ function normalizeTipValues(fields) {
   return asArray(getField(fields, 'TIP')).map((v) => asString(v).toLowerCase());
 }
 
+function normalizePermitType(fields) {
+  const raw = asString(getField(fields, 'Permit Type')).trim();
+  const key = raw.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (key === 'nb' || key.includes('newbuilding') || key.includes('newconstruction')) {
+    return { raw, kind: 'new-building' };
+  }
+  if (
+    key.includes('alt') ||
+    key.includes('alteration') ||
+    key.includes('conversion') ||
+    key.includes('enlargement')
+  ) {
+    return { raw, kind: 'alteration-conversion' };
+  }
+  return raw ? { raw, kind: 'unknown' } : { raw: '', kind: null };
+}
+
 function isIcapRecord(fields) {
   return normalizeTipValues(fields).some((tip) => tip.includes('icap'));
 }
@@ -200,7 +217,12 @@ function deriveProjectFacts(fields, opts) {
   opts = opts || {};
   const units = parseNumber(getField(fields, 'Units'));
   const commercialGrossSqft = parseNumber(getField(fields, 'Commercial Gross SQFT'));
-  const hasCommercial = commercialGrossSqft != null && commercialGrossSqft > 0;
+  const buildingType = asString(getField(fields, 'Building Type')).toLowerCase();
+  const hasCommercial =
+    (commercialGrossSqft != null && commercialGrossSqft > 0) ||
+    buildingType.includes('mixed') ||
+    buildingType.includes('commercial');
+  const permitType = normalizePermitType(fields);
   const icap = resolveIcapTerm(fields, opts.icapBoundariesFile);
 
   return {
@@ -208,6 +230,11 @@ function deriveProjectFacts(fields, opts) {
     buildingSize: units == null ? null : (units > 10 ? 'Large (>10 units)' : 'Small (<=10 units)'),
     keepUnitSection: units == null ? null : (units > 10 ? 'transitional' : 'capped'),
     deleteUnitSection: units == null ? null : (units > 10 ? 'capped' : 'transitional'),
+    permitType,
+    keepPermitScenario: permitType.kind,
+    deletePermitScenario: permitType.kind === 'new-building'
+      ? 'alteration-conversion'
+      : (permitType.kind === 'alteration-conversion' ? 'new-building' : null),
     commercialGrossSqft,
     hasCommercial,
     hasCommercialText: hasCommercial ? 'Yes' : 'No',
@@ -221,6 +248,7 @@ module.exports = {
   parseNumber,
   normalizeBorough,
   normalizeBlock,
+  normalizePermitType,
   deriveProjectFacts,
   resolveIcapTerm
 };
