@@ -571,9 +571,13 @@ app.post('/generate', async (req, res) => {
       if (projectFacts.icap && projectFacts.icap.isIcap && !projectFacts.icap.checked) {
         log('[WARN] ICAP term was not resolved:', projectFacts.icap.reason);
       }
+      const deterministicSwaps = projectRules.buildTemplatePlaceholderSwaps(templateText, fields, projectFacts, { log });
+      if (deterministicSwaps.length) {
+        log(`Template placeholders produced ${deterministicSwaps.length} deterministic swaps`);
+      }
       const schema = await airtable.getTableSchema(AIRTABLE_TABLE_NAME);
       log(`Schema has ${schema.length} fields. Calling Claude (swap mode)...`);
-      const swaps = await agent.mapDocxSwaps(templateText, fields, schema, {
+      const aiSwaps = await agent.mapDocxSwaps(templateText, fields, schema, {
         templateFieldName: TEMPLATE_FIELD,
         outputFieldName: OUTPUT_FIELD,
         templateSelectFieldName: TEMPLATE_SELECT_FIELD,
@@ -581,7 +585,15 @@ app.post('/generate', async (req, res) => {
         markedTargets: docxContext.markedTargets,
         log
       });
-      log(`Claude returned ${swaps.length} swaps`);
+      const seenSwaps = new Set();
+      const swaps = [];
+      for (const swap of deterministicSwaps.concat(aiSwaps)) {
+        const key = String(swap.oldValue || '');
+        if (!key || seenSwaps.has(key)) continue;
+        seenSwaps.add(key);
+        swaps.push(swap);
+      }
+      log(`Claude returned ${aiSwaps.length} swaps; total after deterministic template rules: ${swaps.length}`);
       const CFG_LABELS = ['Building Configuration', 'Project Details', 'Proposed Construction', 'Building Description', 'Project Description'];
       const cfgSwaps = swaps.filter((s) => CFG_LABELS.includes(s.fieldName));
       if (cfgSwaps.length) {
@@ -592,12 +604,20 @@ app.post('/generate', async (req, res) => {
       } else {
         log('No building-config rewrites produced (neither AI configuration_claims nor labeled-line backstop fired).');
       }
-      const result = docxHandler.fillDocxSwaps(templatePath, swaps, outputPath);
+      const result = docxHandler.fillDocxSwaps(templatePath, swaps, outputPath, {
+        markerEvaluator: (paragraphText) => projectRules.evaluateTemplateMarkerText(paragraphText, fields, projectFacts),
+        log
+      });
       log(`Applied ${result.applied.length} swaps; ${result.missed.length} old values not found in doc`);
       if (result.missed.length) {
         log('Missed swaps (old value not located in doc):', result.missed.map((s) => s.oldValue));
       }
-      swapSummary = { applied: result.applied, missed: result.missed };
+      const outputText = docxHandler.extractDocxText(outputPath);
+      const qualityWarnings = projectRules.inspectGeneratedDocxText(outputText, fields, projectFacts);
+      if (qualityWarnings.length) {
+        log('[WARN] Output quality warnings:', qualityWarnings);
+      }
+      swapSummary = { applied: result.applied, missed: result.missed, qualityWarnings };
     } else if (ext === '.xlsx') {
       const workbookJson = await xlsxHandler.extractXlsxContent(templatePath);
       log(`Workbook JSON length: ${workbookJson.length} chars. Fetching table schema...`);

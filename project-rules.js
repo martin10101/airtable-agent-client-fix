@@ -30,6 +30,8 @@ const ICAP_PAIR_COLUMNS = {
   'Staten Island': [[0, 1], [4, 6]]
 };
 
+const CONTROL_MARKER_RE = /\[\[\s*(END|KEEP_IF_[^\]]+|DELETE_IF_[^\]]+)\s*\]\]/i;
+
 let icapCache = null;
 
 function getField(fields, name) {
@@ -242,6 +244,206 @@ function deriveProjectFacts(fields, opts) {
   };
 }
 
+function normalizeToken(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function formatNumber(value) {
+  const n = parseNumber(value);
+  if (n == null) return asString(value);
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(n);
+}
+
+function projectSummary(fields, facts) {
+  const units = facts && facts.units != null ? facts.units : parseNumber(getField(fields, 'Units'));
+  const condoRental = asString(getField(fields, 'Condo/Rental')).toLowerCase();
+  const isCondo = condoRental.includes('condo') && !condoRental.includes('rental');
+  const unitLabel = isCondo ? 'residential condominium units' : 'residential rental units';
+  const parts = [];
+  if (units != null) parts.push(`${formatNumber(units)} ${unitLabel}`);
+  if (facts && facts.hasCommercial) parts.push('commercial space');
+  if (!parts.length && facts && facts.hasCommercial) return 'commercial space';
+  return parts.join(' and ');
+}
+
+function getFactsValue(token, fields, facts) {
+  const key = normalizeToken(token);
+  const borough = normalizeBorough(getField(fields, 'Borough'));
+  const block = asString(getField(fields, 'Block'));
+  const lot = asString(getField(fields, 'Lot'));
+  const genericFields = {};
+  for (const [name, value] of Object.entries(fields || {})) {
+    genericFields[normalizeToken(name)] = value;
+  }
+
+  const direct = {
+    projectsummary: projectSummary(fields, facts),
+    propertysummary: projectSummary(fields, facts),
+    buildingconfiguration: projectSummary(fields, facts),
+    buildingdescription: projectSummary(fields, facts),
+    units: formatNumber(getField(fields, 'Units')),
+    unitcount: formatNumber(getField(fields, 'Units')),
+    propertyaddress: asString(getField(fields, 'Property Address') || getField(fields, 'Address') || getField(fields, 'Project Address')),
+    projectaddress: asString(getField(fields, 'Property Address') || getField(fields, 'Address') || getField(fields, 'Project Address')),
+    address: asString(getField(fields, 'Property Address') || getField(fields, 'Address') || getField(fields, 'Project Address')),
+    owner: asString(getField(fields, 'Owner')),
+    borough: borough ? borough.name : asString(getField(fields, 'Borough')),
+    block,
+    lot,
+    blocklot: block && lot ? `${block} - ${lot}` : '',
+    blockandlot: block && lot ? `${block} - ${lot}` : '',
+    bbl: borough && block && lot ? `${borough.code}${String(block).padStart(5, '0')}${String(lot).padStart(4, '0')}` : '',
+    residentialgrosssqft: formatNumber(getField(fields, 'Residential Gross SQFT') || getField(fields, 'Gross SQFT') || getField(fields, 'Total GSF') || getField(fields, 'GSF')),
+    grosssqft: formatNumber(getField(fields, 'Residential Gross SQFT') || getField(fields, 'Gross SQFT') || getField(fields, 'Total GSF') || getField(fields, 'GSF')),
+    totalgsf: formatNumber(getField(fields, 'Residential Gross SQFT') || getField(fields, 'Gross SQFT') || getField(fields, 'Total GSF') || getField(fields, 'GSF')),
+    commercialgrosssqft: formatNumber(getField(fields, 'Commercial Gross SQFT')),
+    commercialsqft: formatNumber(getField(fields, 'Commercial Gross SQFT')),
+    hascommercial: facts && facts.hasCommercial ? 'Yes' : 'No',
+    buildingsize: facts ? asString(facts.buildingSize) : '',
+    buildingtype: asString(getField(fields, 'Building Type')),
+    permittype: asString(getField(fields, 'Permit Type')),
+    permitscenario: facts ? asString(facts.keepPermitScenario) : '',
+    icapterm: facts && facts.icap ? asString(facts.icap.term) : '',
+    icapyears: facts && facts.icap ? asString(facts.icap.term) : '',
+    abatementterm: facts && facts.icap ? asString(facts.icap.term) : '',
+    affordabilityoption: asString(getField(fields, 'Affordability Option') || getField(fields, '485-X Affordability Option') || getField(fields, '485X Affordability Option'))
+  };
+
+  if (Object.prototype.hasOwnProperty.call(direct, key)) return direct[key];
+  if (Object.prototype.hasOwnProperty.call(genericFields, key)) return asString(genericFields[key]);
+  return '';
+}
+
+function valueForCondition(name, fields, facts) {
+  const key = normalizeToken(name);
+  if (key === 'permit' || key === 'permittype') {
+    const permit = facts && facts.permitType ? facts.permitType : normalizePermitType(fields);
+    return [permit.raw, permit.kind].filter(Boolean).join(' ');
+  }
+  if (key === 'permitkind' || key === 'permitscenario') return facts && facts.keepPermitScenario ? facts.keepPermitScenario : '';
+  if (key === 'units' || key === 'unitcount') return facts && facts.units != null ? facts.units : parseNumber(getField(fields, 'Units'));
+  if (key === 'hascommercial' || key === 'commercial') return facts && facts.hasCommercial ? 'Yes' : 'No';
+  if (key === 'icapterm' || key === 'icapyears' || key === 'abatementterm') return facts && facts.icap ? facts.icap.term : '';
+  if (key === 'tip') return normalizeTipValues(fields).join(', ');
+  if (key === 'buildingsize') return facts ? facts.buildingSize : '';
+  if (key === 'buildingtype') return asString(getField(fields, 'Building Type'));
+  return getFactsValue(name, fields, facts);
+}
+
+function compareCondition(actual, operator, expected) {
+  const actualNum = parseNumber(actual);
+  const expectedNum = parseNumber(expected);
+  if (['>', '>=', '<', '<='].includes(operator) && actualNum != null && expectedNum != null) {
+    if (operator === '>') return actualNum > expectedNum;
+    if (operator === '>=') return actualNum >= expectedNum;
+    if (operator === '<') return actualNum < expectedNum;
+    return actualNum <= expectedNum;
+  }
+
+  const a = normalizeToken(actual);
+  const e = normalizeToken(expected);
+  const eq = a === e || (a && e && a.includes(e));
+  return operator === '!=' ? !eq : eq;
+}
+
+function evaluateTemplateMarkerText(paragraphText, fields, facts) {
+  const match = String(paragraphText || '').match(CONTROL_MARKER_RE);
+  if (!match) return null;
+  const inner = match[1].trim();
+  if (/^END$/i.test(inner)) return { kind: 'end', raw: match[0] };
+
+  const mode = /^DELETE_IF_/i.test(inner) ? 'delete' : 'keep';
+  const condition = inner.replace(/^(KEEP_IF_|DELETE_IF_)/i, '');
+  const parsed = condition.match(/^(.+?)(>=|<=|!=|=|>|<)(.+)$/);
+  if (!parsed) {
+    return { kind: 'start', keep: true, raw: match[0], reason: `Unrecognized marker condition: ${inner}` };
+  }
+
+  const actual = valueForCondition(parsed[1].trim(), fields, facts);
+  const expected = parsed[3].trim();
+  const conditionTrue = compareCondition(actual, parsed[2], expected);
+  const keep = mode === 'keep' ? conditionTrue : !conditionTrue;
+  return {
+    kind: 'start',
+    keep,
+    raw: match[0],
+    reason: `${parsed[1].trim()} ${parsed[2]} ${expected}; actual=${asString(actual)}`
+  };
+}
+
+function buildTemplatePlaceholderSwaps(templateText, fields, facts, opts) {
+  opts = opts || {};
+  const log = typeof opts.log === 'function' ? opts.log : (() => {});
+  const swaps = [];
+  const seen = new Set();
+  const markerRe = /\[\[\s*([A-Za-z0-9 _/&().-]+?)\s*\]\]/g;
+  let m;
+  while ((m = markerRe.exec(String(templateText || ''))) !== null) {
+    const full = m[0];
+    const token = m[1].trim();
+    if (!token || /^END$/i.test(token) || /^(KEEP_IF_|DELETE_IF_)/i.test(token)) continue;
+    if (seen.has(full)) continue;
+    seen.add(full);
+    const value = getFactsValue(token, fields, facts);
+    if (value == null || value === '') {
+      log(`[template-rule] placeholder left unchanged (no Airtable value): ${full}`);
+      continue;
+    }
+    swaps.push({ fieldName: `Template Placeholder ${token}`, oldValue: full, newValue: String(value) });
+    log(`[template-rule] placeholder ${full} -> ${JSON.stringify(String(value).slice(0, 80))}`);
+  }
+  return swaps;
+}
+
+function inspectGeneratedDocxText(text, fields, facts) {
+  const warnings = [];
+  const body = String(text || '');
+  const lower = body.toLowerCase();
+
+  if (/commercial space\s+and\s+commercial space/i.test(body)) {
+    warnings.push('Duplicate commercial language found: "commercial space and commercial space".');
+  }
+  if (/\ba\s+\d+\s+residential/i.test(body)) {
+    warnings.push('Bad grammar found: "a [number] residential...".');
+  }
+  if (/\baggregate\s+gross square feet\b/i.test(body)) {
+    warnings.push('Incomplete gross-square-feet sentence found.');
+  }
+  if (/\[\[[^\]]+\]\]/.test(body)) {
+    warnings.push('Unresolved [[...]] template marker or placeholder remains.');
+  }
+
+  if (facts && facts.deletePermitScenario === 'alteration-conversion') {
+    if (lower.includes('alteration') || lower.includes('conversion')) {
+      warnings.push('Permit Type is NB, but alteration/conversion language remains.');
+    }
+  }
+  if (facts && facts.deletePermitScenario === 'new-building') {
+    if (lower.includes('new building') || lower.includes('new construction')) {
+      warnings.push('Permit Type is alteration/conversion, but new-building language remains.');
+    }
+  }
+  if (facts && facts.icap && facts.icap.term) {
+    const wrong = facts.icap.term === '25-year' ? '15-year' : '25-year';
+    if (lower.includes('icap') && lower.includes(wrong)) {
+      warnings.push(`ICAP lookup selected ${facts.icap.term}, but ${wrong} language remains.`);
+    }
+  }
+  if (facts && facts.units != null) {
+    const unitRe = /\b(\d{1,4})\s+(?:residential\s+)?(?:rental\s+)?(?:apartments|units)\b/gi;
+    let m;
+    while ((m = unitRe.exec(body)) !== null) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n !== facts.units) {
+        warnings.push(`Possible old unit count remains: "${m[0]}" does not match Airtable Units=${facts.units}.`);
+        break;
+      }
+    }
+  }
+
+  return warnings;
+}
+
 module.exports = {
   getField,
   asString,
@@ -250,5 +452,8 @@ module.exports = {
   normalizeBlock,
   normalizePermitType,
   deriveProjectFacts,
-  resolveIcapTerm
+  resolveIcapTerm,
+  evaluateTemplateMarkerText,
+  buildTemplatePlaceholderSwaps,
+  inspectGeneratedDocxText
 };

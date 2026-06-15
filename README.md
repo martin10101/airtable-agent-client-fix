@@ -125,6 +125,39 @@ blank). Placeholder conventions:
   are never overwritten.
 - **PDF (.pdf):** must be a fillable AcroForm (see "PDF support" below).
 
+Recommended Word markers for new/clean templates:
+
+- Use `[[FIELD NAME]]` placeholders for direct Airtable values, for example
+  `[[Property Address]]`, `[[Units]]`, `[[Residential Gross SQFT]]`, or
+  `[[PROJECT_SUMMARY]]`.
+- Wrap alternate sections with deterministic conditions:
+
+```
+[[KEEP_IF_PERMIT=NB]]
+A new mixed-use building will be constructed...
+[[END]]
+
+[[KEEP_IF_PERMIT=ALT]]
+The project involves alteration and conversion...
+[[END]]
+
+[[KEEP_IF_UNITS>10]]
+Large-building transitional language...
+[[END]]
+
+[[KEEP_IF_UNITS<=10]]
+Capped 2A/2B/2C language...
+[[END]]
+
+[[KEEP_IF_HAS_COMMERCIAL=Yes]]
+Commercial language...
+[[END]]
+```
+
+The app removes the marker lines and keeps only the section matching Airtable.
+Old unmarked templates still work through the AI swap flow, but marked templates
+are more predictable.
+
 ### 1g. Create the Airtable field + buttons
 
 See **`airtable-buttons.md`** for exact formulas. TL;DR — add to your table:

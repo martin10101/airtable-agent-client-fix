@@ -122,6 +122,57 @@ function extractMarkedTargetsFromXml(xml, source) {
   return targets;
 }
 
+function extractParagraphText(paragraphXml) {
+  const pieces = [];
+  const runRegex = /<w:r\b[\s\S]*?<\/w:r>/g;
+  let m;
+  while ((m = runRegex.exec(paragraphXml)) !== null) {
+    pieces.push(extractRunText(m[0]));
+  }
+  if (!pieces.length) {
+    const textRegex = /<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g;
+    while ((m = textRegex.exec(paragraphXml)) !== null) pieces.push(decodeXml(m[1]));
+  }
+  return pieces.join('');
+}
+
+function applyTemplateMarkers(xml, markerEvaluator, log) {
+  if (typeof markerEvaluator !== 'function') return xml;
+  const dlog = typeof log === 'function' ? log : (() => {});
+  const paragraphRe = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+  let out = '';
+  let last = 0;
+  const stack = [];
+  let m;
+
+  while ((m = paragraphRe.exec(xml)) !== null) {
+    out += xml.slice(last, m.index);
+    last = m.index + m[0].length;
+
+    const paragraph = m[0];
+    const text = extractParagraphText(paragraph).replace(/\s+/g, ' ').trim();
+    const marker = markerEvaluator(text);
+    const insideDeletedBlock = stack.some((entry) => entry === false);
+
+    if (marker && marker.kind === 'start') {
+      stack.push(!!marker.keep);
+      dlog(`[template-rule] ${marker.keep ? 'keep' : 'delete'} marker block: ${marker.reason || marker.raw || text}`);
+      continue;
+    }
+    if (marker && marker.kind === 'end') {
+      if (stack.length) stack.pop();
+      continue;
+    }
+    if (insideDeletedBlock) continue;
+
+    out += paragraph;
+  }
+
+  out += xml.slice(last);
+  if (stack.length) dlog(`[template-rule] warning: ${stack.length} conditional marker block(s) missing [[END]]`);
+  return out;
+}
+
 function extractDocxMarkedTargets(filePath) {
   const content = fs.readFileSync(filePath);
   const zip = new PizZip(content);
@@ -190,7 +241,8 @@ function mergeSplitTargets(xml, targets) {
 
 // Phase 1: swap-mode filler. Takes a list of swaps [{ fieldName, oldValue, newValue }]
 // and produces the output file. Returns { applied, missed } for the UI summary.
-function fillDocxSwaps(templatePath, swaps, outputPath) {
+function fillDocxSwaps(templatePath, swaps, outputPath, opts) {
+  opts = opts || {};
   const content = fs.readFileSync(templatePath);
   const zip = new PizZip(content);
 
@@ -204,6 +256,10 @@ function fillDocxSwaps(templatePath, swaps, outputPath) {
     const file = zip.file(target);
     if (!file) continue;
     let xml = file.asText();
+
+    if (opts.markerEvaluator) {
+      xml = applyTemplateMarkers(xml, opts.markerEvaluator, opts.log);
+    }
 
     // Merge runs so split old values become contiguous text in one <w:t>.
     xml = mergeSplitTargets(xml, oldValues);
