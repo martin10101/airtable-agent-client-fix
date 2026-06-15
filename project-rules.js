@@ -428,6 +428,12 @@ function inspectGeneratedDocxText(text, fields, facts) {
   if (facts && facts.units != null && facts.units < 100 && /Affordability Option B \(applicable for projects comprising 6 to 99 dwelling units\s+or more\)/i.test(body)) {
     warnings.push('Affordability Option B bracket contains an invalid "6 to 99 ... or more" range.');
   }
+  if (facts && facts.units != null && facts.units > 10 && /For Modest Rental Projects with no more than ten residential dwelling units/i.test(body)) {
+    warnings.push('Under-10 modest rental workbook timing remains in a project with more than 10 units.');
+  }
+  if (facts && facts.units != null && facts.units <= 10 && /For Modest Rental Projects with more than ten and fewer than one hundred residential dwelling units/i.test(body)) {
+    warnings.push('Over-10 modest rental workbook timing remains in a project with 10 or fewer units.');
+  }
   const owner = asString(getField(fields, 'Owner'));
   if (owner && new RegExp(`Sincerely yours[\\s\\S]{0,120}${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,120}Metropolitan Realty`, 'i').test(body)) {
     warnings.push('Signature block appears to contain the Owner instead of the firm signer.');
@@ -668,6 +674,22 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       `For buildings with ${projectSummary(fields, facts)} or more, all building service employees`,
       '',
       'Removed project-specific rewrite of 100+ wage paragraph for under-100-unit project'
+    );
+  }
+
+  if (facts && facts.units != null && facts.units > 10) {
+    add(
+      'Modest Rental Workbook Cleanup',
+      'For Modest Rental Projects with no more than ten residential dwelling units, a 485-X Workbook must be submitted to HPD no earlier than 6 months before the expected completion date and no later than 2 months after the completion date.',
+      '',
+      'Removed under-10 workbook timing for project with more than 10 units'
+    );
+  } else if (facts && facts.units != null && facts.units <= 10) {
+    add(
+      'Modest Rental Workbook Cleanup',
+      'For Modest Rental Projects with more than ten and fewer than one hundred residential dwelling units, a 485-X Workbook must be submitted to HPD no earlier than 9 months before the expected completion date and no later than 2 months after the completion date.',
+      '',
+      'Removed over-10 workbook timing for project with 10 or fewer units'
     );
   }
 

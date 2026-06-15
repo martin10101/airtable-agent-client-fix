@@ -239,6 +239,73 @@ function mergeSplitTargets(xml, targets) {
   });
 }
 
+function addParagraphProperties(paragraph, props) {
+  const inserts = [];
+  if (props.keepNext && !/<w:keepNext\b/.test(paragraph)) inserts.push('<w:keepNext/>');
+  if (props.keepLines && !/<w:keepLines\b/.test(paragraph)) inserts.push('<w:keepLines/>');
+  if (!inserts.length) return paragraph;
+
+  const insertXml = inserts.join('');
+  if (/<w:pPr\b/.test(paragraph)) {
+    return paragraph.replace(/<\/w:pPr>/, `${insertXml}</w:pPr>`);
+  }
+  return paragraph.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${insertXml}</w:pPr>`);
+}
+
+function keepSignatureBlockTogether(xml, log) {
+  const paragraphs = [];
+  const paragraphRe = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+  let m;
+  while ((m = paragraphRe.exec(xml)) !== null) {
+    paragraphs.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      xml: m[0],
+      text: extractParagraphText(m[0]).replace(/\s+/g, ' ').trim()
+    });
+  }
+  if (!paragraphs.length) return xml;
+
+  const startIndex = paragraphs.findIndex((p) => /^Sincerely yours,?$/i.test(p.text));
+  if (startIndex === -1) return xml;
+
+  let endIndex = -1;
+  let nonEmpty = 0;
+  for (let i = startIndex; i < paragraphs.length && i <= startIndex + 8; i++) {
+    const text = paragraphs[i].text;
+    if (text) nonEmpty++;
+    if (/Metropolitan Realty/i.test(text) || (nonEmpty >= 3 && i > startIndex)) {
+      endIndex = i;
+      break;
+    }
+  }
+  if (endIndex === -1) endIndex = Math.min(paragraphs.length - 1, startIndex + 3);
+
+  const replacements = new Map();
+  for (let i = startIndex; i <= endIndex; i++) {
+    replacements.set(
+      i,
+      addParagraphProperties(paragraphs[i].xml, {
+        keepNext: i < endIndex,
+        keepLines: true
+      })
+    );
+  }
+
+  const dlog = typeof log === 'function' ? log : (() => {});
+  dlog(`[layout-fix] Keeping signature block together across paragraphs ${startIndex + 1}-${endIndex + 1}`);
+
+  let out = '';
+  let last = 0;
+  for (let i = 0; i < paragraphs.length; i++) {
+    out += xml.slice(last, paragraphs[i].start);
+    out += replacements.get(i) || paragraphs[i].xml;
+    last = paragraphs[i].end;
+  }
+  out += xml.slice(last);
+  return out;
+}
+
 // Phase 1: swap-mode filler. Takes a list of swaps [{ fieldName, oldValue, newValue }]
 // and produces the output file. Returns { applied, missed } for the UI summary.
 function fillDocxSwaps(templatePath, swaps, outputPath, opts) {
@@ -284,6 +351,9 @@ function fillDocxSwaps(templatePath, swaps, outputPath, opts) {
       if (count) {
         hitCounts.set(swap.oldValue, (hitCounts.get(swap.oldValue) || 0) + count);
       }
+    }
+    if (target === 'word/document.xml') {
+      xml = keepSignatureBlockTogether(xml, opts.log);
     }
     zip.file(target, xml);
   }
