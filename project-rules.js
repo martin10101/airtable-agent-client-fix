@@ -298,6 +298,12 @@ function projectDetailSentence(fields, facts) {
     : `A new ${kind} will be constructed.`;
 }
 
+function permitWorkTerm(facts) {
+  if (facts && facts.keepPermitScenario === 'alteration-conversion') return 'renovation';
+  if (facts && facts.keepPermitScenario === 'new-building') return 'new construction';
+  return '';
+}
+
 function getFactsValue(token, fields, facts) {
   const key = normalizeToken(token);
   const borough = normalizeBorough(getField(fields, 'Borough'));
@@ -315,6 +321,8 @@ function getFactsValue(token, fields, facts) {
     buildingdescription: projectSummary(fields, facts),
     projectdetailsentence: projectDetailSentence(fields, facts),
     constructiondescription: projectDetailSentence(fields, facts),
+    permitworkterm: permitWorkTerm(facts),
+    constructionworkterm: permitWorkTerm(facts),
     units: formatNumber(getField(fields, 'Units')),
     unitcount: formatNumber(getField(fields, 'Units')),
     propertyaddress: asString(getField(fields, 'Property Address') || getField(fields, 'Address') || getField(fields, 'Project Address')),
@@ -489,6 +497,9 @@ function inspectGeneratedDocxText(text, fields, facts) {
   if (facts && facts.keepPermitScenario === 'alteration-conversion' && /\bnew construction\b/i.test(body)) {
     warnings.push('Permit Type is ALT/renovation, but "new construction" language remains.');
   }
+  if (/\b(?:new construction\s*(?:\/|or|and)?\s*renovation|renovation\s*(?:\/|or|and)?\s*new construction)\b/i.test(body)) {
+    warnings.push('Combined new-construction/renovation wording remains instead of one permit-specific term.');
+  }
   if (/Under the DOF's rules and regulations,\s+\d+\s+residential[^.]*will be classified as Tax Class 2/i.test(body)) {
     warnings.push('Tax Class 2 classification sentence contains project unit details instead of the legal Class A phrase.');
   }
@@ -556,6 +567,16 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       add(fieldName, paragraph, newValue, reason);
     }
   };
+  const addMatchingText = (fieldName, regex, newValue, reason) => {
+    const seen = new Set();
+    let match;
+    regex.lastIndex = 0;
+    while ((match = regex.exec(body)) !== null) {
+      if (!match[0] || seen.has(match[0])) continue;
+      seen.add(match[0]);
+      add(fieldName, match[0], newValue, reason);
+    }
+  };
 
   add(
     'Quality Fix',
@@ -601,6 +622,16 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   let m;
   while ((m = badArticleRe.exec(body)) !== null) {
     add('Quality Fix', m[0], m[1], 'Removed bad article before unit phrase');
+  }
+
+  const workTerm = permitWorkTerm(facts);
+  if (workTerm) {
+    addMatchingText(
+      'Permit Type Cleanup',
+      /\b(?:new construction\s*(?:\/|or|and)?\s*renovation|renovation\s*(?:\/|or|and)?\s*new construction)\b/gi,
+      workTerm,
+      'Collapsed combined new-construction/renovation wording to the permit-specific term'
+    );
   }
 
   const desiredProjectDetail = projectDetailSentence(fields, facts);
