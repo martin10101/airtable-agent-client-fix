@@ -365,6 +365,46 @@ function tidyBlankParagraphs(xml, log) {
   return out;
 }
 
+function removeDuplicateProjectedAssessedHeadings(xml, log) {
+  const target = 'projected assessed value increase and phase-in';
+  const paragraphs = [];
+  const paragraphRe = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+  let m;
+  while ((m = paragraphRe.exec(xml)) !== null) {
+    paragraphs.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      xml: m[0],
+      text: extractParagraphText(m[0]).replace(/\s+/g, ' ').trim().toLowerCase()
+    });
+  }
+
+  let seen = false;
+  const remove = new Set();
+  for (let i = 0; i < paragraphs.length; i++) {
+    if (paragraphs[i].text !== target) continue;
+    if (!seen) {
+      seen = true;
+      continue;
+    }
+    remove.add(i);
+  }
+  if (!remove.size) return xml;
+
+  const dlog = typeof log === 'function' ? log : (() => {});
+  dlog(`[layout-fix] Removed ${remove.size} duplicate Projected Assessed Value Increase heading(s)`);
+
+  let out = '';
+  let last = 0;
+  for (let i = 0; i < paragraphs.length; i++) {
+    out += xml.slice(last, paragraphs[i].start);
+    if (!remove.has(i)) out += paragraphs[i].xml;
+    last = paragraphs[i].end;
+  }
+  out += xml.slice(last);
+  return out;
+}
+
 // Phase 1: swap-mode filler. Takes a list of swaps [{ fieldName, oldValue, newValue }]
 // and produces the output file. Returns { applied, missed } for the UI summary.
 function fillDocxSwaps(templatePath, swaps, outputPath, opts) {
@@ -412,6 +452,7 @@ function fillDocxSwaps(templatePath, swaps, outputPath, opts) {
       }
     }
     if (target === 'word/document.xml') {
+      xml = removeDuplicateProjectedAssessedHeadings(xml, opts.log);
       xml = tidyBlankParagraphs(xml, opts.log);
       xml = keepSignatureBlockTogether(xml, opts.log);
     }

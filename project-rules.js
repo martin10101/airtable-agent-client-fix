@@ -489,6 +489,13 @@ function inspectGeneratedDocxText(text, fields, facts) {
   if (facts && facts.keepPermitScenario === 'alteration-conversion' && /\bnew construction\b/i.test(body)) {
     warnings.push('Permit Type is ALT/renovation, but "new construction" language remains.');
   }
+  if (/Under the DOF's rules and regulations,\s+\d+\s+residential[^.]*will be classified as Tax Class 2/i.test(body)) {
+    warnings.push('Tax Class 2 classification sentence contains project unit details instead of the legal Class A phrase.');
+  }
+  const projectedHeadingCount = (body.match(/Projected Assessed Value Increase and Phase-In/gi) || []).length;
+  if (projectedHeadingCount > 1) {
+    warnings.push('Duplicate Projected Assessed Value Increase and Phase-In heading remains.');
+  }
   const owner = asString(getField(fields, 'Owner'));
   if (owner && new RegExp(`Sincerely yours[\\s\\S]{0,120}${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,120}Metropolitan Realty`, 'i').test(body)) {
     warnings.push('Signature block appears to contain the Owner instead of the firm signer.');
@@ -535,6 +542,7 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   const swaps = [];
   const add = (fieldName, oldValue, newValue, reason) => {
     if (!oldValue || swaps.some((s) => s.oldValue === oldValue && s.newValue === newValue)) return;
+    if (String(oldValue) === String(newValue)) return;
     if (!body.toLowerCase().includes(String(oldValue).toLowerCase())) return;
     swaps.push({ fieldName, oldValue, newValue });
     log(`[quality-fix] ${reason}: ${JSON.stringify(String(oldValue).slice(0, 120))} -> ${JSON.stringify(String(newValue).slice(0, 120))}`);
@@ -753,6 +761,16 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     }
   }
 
+  const badClass2Sentence = body.match(/Under the DOF's rules and regulations,\s+\d+\s+residential[^\r\n.]*?will be classified as Tax Class 2\.?/i);
+  if (badClass2Sentence) {
+    add(
+      'Valuation Section Cleanup',
+      badClass2Sentence[0],
+      "Under the DOF's rules and regulations, multiple Class A residential units will be classified as Tax Class 2.",
+      'Restored legal Tax Class 2 classification phrase'
+    );
+  }
+
   const under100Project = facts && facts.units != null && facts.units < 100;
   const badWageSentence = body.match(/For buildings with\s+\d+\s+residential[^\r\n.]*?\s+or more,\s+all building service employees/i);
   if (badWageSentence && !under100Project) {
@@ -820,16 +838,16 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   }
 
   if (facts && facts.units != null && facts.units > 10) {
-    add(
+    addMatchingParagraphs(
       'Modest Rental Workbook Cleanup',
-      'For Modest Rental Projects with no more than ten residential dwelling units, a 485-X Workbook must be submitted to HPD no earlier than 6 months before the expected completion date and no later than 2 months after the completion date.',
+      /For Modest Rental Projects with no more than ten residential dwelling units,\s+a 485-x Workbook must be submitted to HPD no earlier than 6 months before the expected completion date and no later than 2 months after the completion date\.?/i,
       '',
       'Removed under-10 workbook timing for project with more than 10 units'
     );
   } else if (facts && facts.units != null && facts.units <= 10) {
-    add(
+    addMatchingParagraphs(
       'Modest Rental Workbook Cleanup',
-      'For Modest Rental Projects with more than ten and fewer than one hundred residential dwelling units, a 485-X Workbook must be submitted to HPD no earlier than 9 months before the expected completion date and no later than 2 months after the completion date.',
+      /For Modest Rental Projects with more than ten and fewer than one hundred residential dwelling units,\s+a 485-x Workbook must be submitted to HPD no earlier than 9 months before the expected completion date and no later than 2 months after the completion date\.?/i,
       '',
       'Removed over-10 workbook timing for project with 10 or fewer units'
     );
