@@ -406,8 +406,12 @@ function inspectGeneratedDocxText(text, fields, facts) {
   if (/\ba\s+\d+\s+residential/i.test(body)) {
     warnings.push('Bad grammar found: "a [number] residential...".');
   }
+  const grossSqft = getFactsValue('Residential Gross SQFT', fields, facts);
   if (/\baggregate\s+gross square feet\b/i.test(body)) {
     warnings.push('Incomplete gross-square-feet sentence found.');
+  }
+  if (!grossSqft && /\baggregate\s+[\d,.\s]+gross square feet\b/i.test(body)) {
+    warnings.push('Gross-square-foot sentence remains even though Airtable has no Residential Gross SQFT value.');
   }
   if (/\[\[[^\]]+\]\]/.test(body)) {
     warnings.push('Unresolved [[...]] template marker or placeholder remains.');
@@ -497,8 +501,15 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   }
 
   const grossSqft = getFactsValue('Residential Gross SQFT', fields, facts);
-  if (/\baggregate\s+gross square feet\b/i.test(body)) {
+  const aggregateGrossSqftSentence = body.match(/The building will aggregate\s+[\d,.\s]*gross square feet\.?/i);
+  if (/\baggregate\s+[\d,.\s]*gross square feet\b/i.test(body)) {
     if (grossSqft) {
+      add(
+        'Gross SQFT Cleanup',
+        aggregateGrossSqftSentence ? aggregateGrossSqftSentence[0] : 'aggregate gross square feet',
+        aggregateGrossSqftSentence ? `The building will aggregate ${grossSqft} gross square feet.` : `aggregate ${grossSqft} gross square feet`,
+        'Filled missing or stale gross-square-foot phrase'
+      );
       add(
         'Gross SQFT Cleanup',
         'aggregate gross square feet',
@@ -506,6 +517,14 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
         'Filled missing gross-square-foot phrase'
       );
     } else {
+      if (aggregateGrossSqftSentence) {
+        add(
+          'Gross SQFT Cleanup',
+          aggregateGrossSqftSentence[0],
+          '',
+          'Removed gross-square-foot sentence because Airtable has no Residential Gross SQFT value'
+        );
+      }
       add(
         'Gross SQFT Cleanup',
         'The building will aggregate gross square feet.',
