@@ -32,6 +32,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
+const APP_VERSION = '2026-06-15-statutory-threshold-v2';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -450,7 +451,7 @@ a{color:#4f8cff}code{background:#1b1f28;padding:4px 8px;border-radius:6px;displa
 }
 
 // -------- Health --------
-app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime(), templatesFolder: TEMPLATES_DIR }));
+app.get('/health', (_req, res) => res.json({ ok: true, version: APP_VERSION, uptime: process.uptime(), templatesFolder: TEMPLATES_DIR }));
 
 // -------- Background trigger ? fires /generate in background, auto-closing tab --------
 app.get('/trigger/:recordId', (req, res) => {
@@ -490,7 +491,7 @@ app.post('/generate', async (req, res) => {
       return res.status(400).json({ success: false, error: 'recordId is required (e.g. recXXXXXXXXXXXXXX)' });
     }
 
-    log('=== /generate start ===', recordId, templateFilename || '(check record for Template field)');
+    log('=== /generate start ===', APP_VERSION, recordId, templateFilename || '(check record for Template field)');
 
     // Fetch record
     const record = await airtable.getRecord(recordId);
@@ -702,6 +703,7 @@ app.listen(PORT, () => {
   console.log('');
   console.log('  Airtable Document Agent');
   console.log('  ------------------------');
+  console.log(`  Version:    ${APP_VERSION}`);
   console.log(`  UI:         http://localhost:${PORT}`);
   if (templatesCheck.ok) {
     console.log(`  Templates:  ${TEMPLATES_DIR}  (${templatesCheck.fileCount} entries)`);
