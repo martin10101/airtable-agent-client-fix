@@ -266,6 +266,38 @@ function projectSummary(fields, facts) {
   return parts.join(' and ');
 }
 
+function grossSqftDescription(fields) {
+  const residential = parseNumber(getField(fields, 'Residential Gross SQFT'));
+  const commercial = parseNumber(getField(fields, 'Commercial Gross SQFT'));
+  const fallback = parseNumber(getField(fields, 'Gross SQFT') || getField(fields, 'Total GSF') || getField(fields, 'GSF'));
+  const parts = [];
+  if (residential != null) parts.push(`${formatNumber(residential)} residential gross square feet`);
+  if (commercial != null && commercial > 0) parts.push(`${formatNumber(commercial)} commercial gross square feet`);
+  if (parts.length) return parts.join(' and ');
+  return fallback != null ? `${formatNumber(fallback)} gross square feet` : '';
+}
+
+function buildingKind(fields, facts) {
+  if (facts && facts.hasCommercial && facts.units != null) return 'mixed-use building';
+  if (facts && facts.units != null) return 'residential building';
+  if (facts && facts.hasCommercial) return 'commercial building';
+  const raw = asString(getField(fields, 'Building Type')).trim();
+  return raw ? `${raw.toLowerCase()} building` : 'building';
+}
+
+function projectDetailSentence(fields, facts) {
+  const summary = projectSummary(fields, facts);
+  const kind = buildingKind(fields, facts);
+  if (facts && facts.keepPermitScenario === 'alteration-conversion') {
+    return summary
+      ? `The project involves the proposed renovation of an existing building into a ${kind}, featuring ${summary}.`
+      : `The project involves the proposed renovation of an existing building into a ${kind}.`;
+  }
+  return summary
+    ? `A new ${kind} will be constructed, featuring ${summary}.`
+    : `A new ${kind} will be constructed.`;
+}
+
 function getFactsValue(token, fields, facts) {
   const key = normalizeToken(token);
   const borough = normalizeBorough(getField(fields, 'Borough'));
@@ -281,6 +313,8 @@ function getFactsValue(token, fields, facts) {
     propertysummary: projectSummary(fields, facts),
     buildingconfiguration: projectSummary(fields, facts),
     buildingdescription: projectSummary(fields, facts),
+    projectdetailsentence: projectDetailSentence(fields, facts),
+    constructiondescription: projectDetailSentence(fields, facts),
     units: formatNumber(getField(fields, 'Units')),
     unitcount: formatNumber(getField(fields, 'Units')),
     propertyaddress: asString(getField(fields, 'Property Address') || getField(fields, 'Address') || getField(fields, 'Project Address')),
@@ -295,6 +329,8 @@ function getFactsValue(token, fields, facts) {
     bbl: borough && block && lot ? `${borough.code}${String(block).padStart(5, '0')}${String(lot).padStart(4, '0')}` : '',
     residentialgrosssqft: formatNumber(getField(fields, 'Residential Gross SQFT') || getField(fields, 'Gross SQFT') || getField(fields, 'Total GSF') || getField(fields, 'GSF')),
     grosssqft: formatNumber(getField(fields, 'Residential Gross SQFT') || getField(fields, 'Gross SQFT') || getField(fields, 'Total GSF') || getField(fields, 'GSF')),
+    grosssqftdescription: grossSqftDescription(fields),
+    grosssquarefeetdescription: grossSqftDescription(fields),
     totalgsf: formatNumber(getField(fields, 'Residential Gross SQFT') || getField(fields, 'Gross SQFT') || getField(fields, 'Total GSF') || getField(fields, 'GSF')),
     commercialgrosssqft: formatNumber(getField(fields, 'Commercial Gross SQFT')),
     commercialsqft: formatNumber(getField(fields, 'Commercial Gross SQFT')),
@@ -411,14 +447,18 @@ function inspectGeneratedDocxText(text, fields, facts) {
     warnings.push('Bad grammar found: "a [number] residential...".');
   }
   const grossSqft = getFactsValue('Residential Gross SQFT', fields, facts);
+  const grossSqftText = grossSqftDescription(fields);
   if (/\baggregate\s+gross square feet\b/i.test(body)) {
     warnings.push('Incomplete gross-square-feet sentence found.');
   }
-  if (!grossSqft && /\baggregate\s+[\d,.\s]+gross square feet\b/i.test(body)) {
-    warnings.push('Gross-square-foot sentence remains even though Airtable has no Residential Gross SQFT value.');
+  if (grossSqftText && /(?:residential|commercial) gross square feet/i.test(grossSqftText) && /\baggregate\s+[\d,.\s]+gross square feet\b/i.test(body) && !/\baggregate\b[^\r\n.]*\b(?:residential|commercial) gross square feet\b/i.test(body)) {
+    warnings.push('Gross-square-foot sentence does not say whether the area is residential or commercial.');
   }
-  if (!grossSqft && /\baggregate\s+\[[^\]]*gross[^\]]*\]\s+gross square feet\b/i.test(body)) {
-    warnings.push('Gross-square-foot placeholder remains even though Airtable has no Residential Gross SQFT value.');
+  if (!grossSqftText && /\baggregate\s+[\d,.\s]+gross square feet\b/i.test(body)) {
+    warnings.push('Gross-square-foot sentence remains even though Airtable has no gross square footage value.');
+  }
+  if (!grossSqftText && /\baggregate\s+\[[^\]]*gross[^\]]*\]\s+gross square feet\b/i.test(body)) {
+    warnings.push('Gross-square-foot placeholder remains even though Airtable has no gross square footage value.');
   }
   if (/For buildings with\s+\d+\s+residential[^.]*\s+or more/i.test(body)) {
     warnings.push('Possible statutory unit threshold was replaced with the project summary.');
@@ -437,6 +477,17 @@ function inspectGeneratedDocxText(text, fields, facts) {
   }
   if (facts && facts.units != null && facts.units <= 10 && /For Modest Rental Projects with more than ten and fewer than one hundred residential dwelling units/i.test(body)) {
     warnings.push('Over-10 modest rental workbook timing remains in a project with 10 or fewer units.');
+  }
+  const hasTransitionalSection = /Transitional Assessed Valuation|transition assessment system|phased-in transition assessment|multiple Class A residential units will be classified as Tax Class 2/i.test(body);
+  const hasCapSection = /Tax Class 2a,\s*2b and 2c CAP|Tax Class 2a|tax classes 2a,\s*2b,\s*and 2c|8% cap on annual assessment increases|30% within any five-year period/i.test(body);
+  if (facts && facts.units != null && facts.units > 10 && hasCapSection) {
+    warnings.push('2A/2B/2C cap section remains in a project with more than 10 units.');
+  }
+  if (facts && facts.units != null && facts.units <= 10 && hasTransitionalSection) {
+    warnings.push('Transitional assessed valuation section remains in a project with 10 or fewer units.');
+  }
+  if (facts && facts.keepPermitScenario === 'alteration-conversion' && /\bnew construction\b/i.test(body)) {
+    warnings.push('Permit Type is ALT/renovation, but "new construction" language remains.');
   }
   const owner = asString(getField(fields, 'Owner'));
   if (owner && new RegExp(`Sincerely yours[\\s\\S]{0,120}${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,120}Metropolitan Realty`, 'i').test(body)) {
@@ -488,6 +539,15 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     swaps.push({ fieldName, oldValue, newValue });
     log(`[quality-fix] ${reason}: ${JSON.stringify(String(oldValue).slice(0, 120))} -> ${JSON.stringify(String(newValue).slice(0, 120))}`);
   };
+  const addMatchingParagraphs = (fieldName, regex, newValue, reason) => {
+    const seen = new Set();
+    for (const raw of body.split(/\r?\n/)) {
+      const paragraph = raw.replace(/\s+/g, ' ').trim();
+      if (!paragraph || seen.has(paragraph) || !regex.test(paragraph)) continue;
+      seen.add(paragraph);
+      add(fieldName, paragraph, newValue, reason);
+    }
+  };
 
   add(
     'Quality Fix',
@@ -535,6 +595,45 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     add('Quality Fix', m[0], m[1], 'Removed bad article before unit phrase');
   }
 
+  const desiredProjectDetail = projectDetailSentence(fields, facts);
+  if (desiredProjectDetail) {
+    const newBuildingLine = body.match(/A new [^\r\n.]*building[^\r\n.]*will be constructed[^\r\n.]*\./i);
+    const renovationLine = body.match(/The project involves[^\r\n.]*(?:alteration|conversion|renovation)[^\r\n.]*\./i);
+    if (facts && facts.keepPermitScenario === 'new-building') {
+      if (newBuildingLine) {
+        add(
+          'Project Detail Cleanup',
+          newBuildingLine[0],
+          desiredProjectDetail,
+          'Normalized project detail line for NB/new-building permit'
+        );
+      } else if (renovationLine) {
+        add(
+          'Project Detail Cleanup',
+          renovationLine[0],
+          desiredProjectDetail,
+          'Moved NB/new-building project detail into the remaining numbered line'
+        );
+      }
+    } else if (facts && facts.keepPermitScenario === 'alteration-conversion') {
+      if (renovationLine) {
+        add(
+          'Project Detail Cleanup',
+          renovationLine[0],
+          desiredProjectDetail,
+          'Normalized project detail line for ALT/renovation permit'
+        );
+      } else if (newBuildingLine) {
+        add(
+          'Project Detail Cleanup',
+          newBuildingLine[0],
+          desiredProjectDetail,
+          'Moved ALT/renovation project detail into the remaining numbered line'
+        );
+      }
+    }
+  }
+
   if (facts && facts.deletePermitScenario === 'alteration-conversion') {
     for (const phrase of [
       'The project involves the proposed alteration and conversion',
@@ -552,30 +651,36 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       'A new mixed-use building will be constructed',
       'A new residential building will be constructed',
       'A new commercial building will be constructed',
-      'new building will be constructed',
-      'new construction'
+      'new building will be constructed'
     ]) {
       if (body.toLowerCase().includes(phrase.toLowerCase())) {
         add('Permit Type Cleanup', phrase, '', 'Removed new-building language for alteration/conversion project');
         break;
       }
     }
+    add(
+      'Permit Type Cleanup',
+      'new construction',
+      'renovation',
+      'Changed new-construction wording to renovation for ALT/renovation project'
+    );
   }
 
   const grossSqft = getFactsValue('Residential Gross SQFT', fields, facts);
+  const grossSqftText = grossSqftDescription(fields);
   const aggregateGrossSqftSentence = body.match(/The building will aggregate\s+(?:[\d,.\s]*|\[[^\]]+\]\s*)gross square feet\.?/i);
   if (/\baggregate\s+(?:[\d,.\s]*|\[[^\]]+\]\s*)gross square feet\b/i.test(body)) {
-    if (grossSqft) {
+    if (grossSqftText) {
       add(
         'Gross SQFT Cleanup',
         aggregateGrossSqftSentence ? aggregateGrossSqftSentence[0] : 'aggregate gross square feet',
-        aggregateGrossSqftSentence ? `The building will aggregate ${grossSqft} gross square feet.` : `aggregate ${grossSqft} gross square feet`,
+        aggregateGrossSqftSentence ? `The building will aggregate ${grossSqftText}.` : `aggregate ${grossSqftText}`,
         'Filled missing or stale gross-square-foot phrase'
       );
       add(
         'Gross SQFT Cleanup',
         'aggregate gross square feet',
-        `aggregate ${grossSqft} gross square feet`,
+        `aggregate ${grossSqftText}`,
         'Filled missing gross-square-foot phrase'
       );
     } else {
@@ -727,6 +832,34 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       'For Modest Rental Projects with more than ten and fewer than one hundred residential dwelling units, a 485-X Workbook must be submitted to HPD no earlier than 9 months before the expected completion date and no later than 2 months after the completion date.',
       '',
       'Removed over-10 workbook timing for project with 10 or fewer units'
+    );
+  }
+
+  if (facts && facts.units != null && facts.units > 10) {
+    addMatchingParagraphs(
+      'Valuation Section Cleanup',
+      /^(?:Tax Class\s*)?2a,\s*2b\s*and\s*2c\s*CAP$|^Tax Class 2a,\s*2b\s*and\s*2c\s*CAP$/i,
+      '',
+      'Removed 2A/2B/2C cap heading for project with more than 10 units'
+    );
+    addMatchingParagraphs(
+      'Valuation Section Cleanup',
+      /tax classes 2a,\s*2b,\s*and 2c|tax class 2a,\s*2b,\s*and 2c|8% cap on annual assessment increases|30% within any five-year period|assessment cap does not apply/i,
+      '',
+      'Removed 2A/2B/2C cap paragraph for project with more than 10 units'
+    );
+  } else if (facts && facts.units != null && facts.units <= 10) {
+    addMatchingParagraphs(
+      'Valuation Section Cleanup',
+      /^Transitional Assessed Valuation$/i,
+      '',
+      'Removed transitional assessed valuation heading for project with 10 or fewer units'
+    );
+    addMatchingParagraphs(
+      'Valuation Section Cleanup',
+      /multiple Class A residential units will be classified as Tax Class 2|transition assessment system|phased-in transition assessment|substantial increase in value.*future years.*phased-in transition/i,
+      '',
+      'Removed transitional assessed valuation paragraph for project with 10 or fewer units'
     );
   }
 
