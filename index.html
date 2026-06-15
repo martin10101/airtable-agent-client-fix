@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Airtable Document Agent</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        --bg: #0f1115;
+        --panel: #181c24;
+        --border: #2a2f3a;
+        --text: #e6e8ee;
+        --muted: #8a90a0;
+        --accent: #4f8cff;
+        --accent-hover: #3a78ef;
+        --ok: #3ecf8e;
+        --err: #ff5c5c;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+      .card {
+        width: 100%;
+        max-width: 660px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 32px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+      }
+      h1 { margin: 0 0 4px 0; font-size: 22px; font-weight: 600; }
+      .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+      label { display: block; font-size: 13px; margin-bottom: 6px; color: var(--muted); }
+      input[type="text"], select {
+        width: 100%;
+        padding: 11px 13px;
+        background: #0f1115;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        font-size: 14px;
+        font-family: "SF Mono", Consolas, monospace;
+      }
+      select { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+      input[type="text"]:focus, select:focus { outline: none; border-color: var(--accent); }
+      .row { margin-bottom: 16px; }
+      .row-split { display: flex; gap: 8px; }
+      .row-split > *:first-child { flex: 1; }
+      button {
+        padding: 11px 16px;
+        background: var(--accent);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      button:hover:not(:disabled) { background: var(--accent-hover); }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      button.secondary {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text);
+      }
+      button.secondary:hover:not(:disabled) { background: #1b1f28; }
+      .generate-btn { width: 100%; margin-top: 4px; }
+      .status {
+        margin-top: 20px;
+        padding: 14px;
+        border-radius: 8px;
+        font-size: 13px;
+        line-height: 1.5;
+        border: 1px solid var(--border);
+        background: #0f1115;
+        display: none;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .status.ok { border-color: var(--ok); }
+      .status.err { border-color: var(--err); }
+      .status a { color: var(--accent); word-break: break-all; }
+      .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+      .spinner {
+        display: inline-block;
+        width: 14px; height: 14px;
+        border: 2px solid rgba(255,255,255,0.3);
+        border-top-color: white;
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+        vertical-align: middle;
+        margin-right: 8px;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .folder-info {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 6px;
+        word-break: break-all;
+      }
+      .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+      details.swaps { margin-top: 14px; border: 1px solid var(--border); border-radius: 6px; background: #0f1115; }
+      details.swaps > summary { cursor: pointer; padding: 10px 12px; font-size: 13px; font-weight: 600; color: var(--text); list-style: none; }
+      details.swaps > summary::-webkit-details-marker { display: none; }
+      details.swaps > summary::before { content: "\25B6  "; color: var(--muted); font-size: 10px; }
+      details.swaps[open] > summary::before { content: "\25BC  "; }
+      details.swaps .swap-body { padding: 0 12px 12px 12px; }
+      details.swaps table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: "SF Mono", Consolas, monospace; }
+      details.swaps th { text-align: left; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); padding: 6px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+      details.swaps td { padding: 6px 4px; border-bottom: 1px solid #1b1f28; vertical-align: top; word-break: break-word; }
+      details.swaps td.field { color: var(--accent); white-space: nowrap; }
+      details.swaps td.arrow { color: var(--muted); text-align: center; }
+      details.swaps td.old { color: #ff9a9a; }
+      details.swaps td.new { color: #9afab0; }
+      details.swaps .missed-section { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+      details.swaps .missed-title { color: #ffb86c; font-size: 12px; margin-bottom: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Airtable Document Agent</h1>
+      <div class="sub">Pick a template from your local folder, fill it with record data, save it.</div>
+
+      <div class="row">
+        <label for="tpl">Template</label>
+        <div class="row-split">
+          <select id="tpl"><option>Loading...</option></select>
+          <button type="button" class="secondary" id="refresh" title="Reload template list">&#x21bb;</button>
+          <button type="button" class="secondary" id="openFolder">Open folder</button>
+        </div>
+        <div class="folder-info" id="folderInfo"></div>
+      </div>
+
+      <div class="row">
+        <label for="rec">Airtable Record ID or URL</label>
+        <input id="rec" type="text" placeholder="recXXXXXXXXXXXXXX  or full Airtable URL" />
+        <div class="hint">Paste the record ID or the full Airtable URL.</div>
+      </div>
+
+      <button type="button" id="go" class="generate-btn">Generate Document</button>
+
+      <div id="status" class="status"></div>
+    </div>
+
+    <script>
+      const tplSel = document.getElementById('tpl');
+      const refreshBtn = document.getElementById('refresh');
+      const openFolderBtn = document.getElementById('openFolder');
+      const folderInfo = document.getElementById('folderInfo');
+      const recInput = document.getElementById('rec');
+      const goBtn = document.getElementById('go');
+      const status = document.getElementById('status');
+
+      function extractRecordId(raw) {
+        if (!raw) return null;
+        const m = String(raw).trim().match(/rec[a-zA-Z0-9]{14,}/);
+        return m ? m[0] : null;
+      }
+
+      function esc(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+
+      function renderSwaps(swaps) {
+        if (!swaps || (!swaps.applied && !swaps.missed)) return '';
+        const applied = swaps.applied || [];
+        const missed = swaps.missed || [];
+        const total = applied.length + missed.length;
+        if (!total) return '';
+
+        let tableHtml = '';
+        if (applied.length) {
+          tableHtml += '<table><thead><tr>' +
+            '<th>Field</th><th>Old</th><th></th><th>New</th><th style="text-align:right">×</th>' +
+            '</tr></thead><tbody>';
+          for (const s of applied) {
+            tableHtml +=
+              '<tr>' +
+              '<td class="field">' + esc(s.fieldName || '') + '</td>' +
+              '<td class="old">' + esc(s.oldValue) + '</td>' +
+              '<td class="arrow">&rarr;</td>' +
+              '<td class="new">' + esc(s.newValue) + '</td>' +
+              '<td style="text-align:right;color:#8a90a0">' + (s.count || 1) + '</td>' +
+              '</tr>';
+          }
+          tableHtml += '</tbody></table>';
+        }
+        if (missed.length) {
+          tableHtml += '<div class="missed-section"><div class="missed-title">' +
+            'Missed (old value not found in doc — skipped): ' + missed.length + '</div>';
+          tableHtml += '<table><tbody>';
+          for (const s of missed) {
+            tableHtml +=
+              '<tr><td class="field">' + esc(s.fieldName || '') + '</td>' +
+              '<td class="old">' + esc(s.oldValue) + '</td></tr>';
+          }
+          tableHtml += '</tbody></table></div>';
+        }
+
+        const summary = applied.length + ' swap' + (applied.length === 1 ? '' : 's') +
+          ' applied' + (missed.length ? ', ' + missed.length + ' missed' : '');
+        return '<details class="swaps"><summary>' + summary + '</summary>' +
+          '<div class="swap-body">' + tableHtml + '</div></details>';
+      }
+
+      function showStatus(html, kind) {
+        status.className = 'status' + (kind ? ' ' + kind : '');
+        status.innerHTML = html;
+        status.style.display = 'block';
+      }
+
+      async function loadTemplates() {
+        tplSel.disabled = true;
+        tplSel.innerHTML = '<option>Loading...</option>';
+        try {
+          const res = await fetch('/templates');
+          const data = await res.json();
+          folderInfo.textContent = 'Folder: ' + (data.folder || '(unknown)');
+          if (!data.files || data.files.length === 0) {
+            tplSel.innerHTML = '<option value="">(no templates found — click "Open folder" and drop some in)</option>';
+            tplSel.disabled = true;
+            return;
+          }
+          tplSel.innerHTML = data.files.map(function (f) {
+            return '<option value="' + f.replace(/"/g, '&quot;') + '">' + f + '</option>';
+          }).join('');
+          tplSel.disabled = false;
+        } catch (e) {
+          tplSel.innerHTML = '<option>error loading templates</option>';
+          folderInfo.textContent = 'Error: ' + e.message;
+        }
+      }
+
+      async function generate() {
+        const recordId = extractRecordId(recInput.value);
+        const templateFilename = tplSel.value;
+        if (!recordId) { showStatus('Could not find a valid record ID. It should start with "rec".', 'err'); return; }
+        if (!templateFilename) { showStatus('Pick a template first.', 'err'); return; }
+
+        goBtn.disabled = true;
+        showStatus('<span class="spinner"></span>Generating document for ' + recordId + ' using "' + templateFilename + '"... This may take 15-45 seconds.', '');
+
+        try {
+          const res = await fetch('/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ recordId: recordId, templateFilename: templateFilename })
+          });
+          const data = await res.json();
+          if (data.success) {
+            let msg = '<strong>Done in ' + data.elapsedSeconds + 's.</strong>\n';
+            msg += 'File: <code>' + data.outputFilename + '</code>\n';
+            msg += 'Saved to: ' + data.filePath + '\n';
+            msg += 'Uploaded to Airtable: ' + (data.uploadedToAirtable ? 'yes' : 'no');
+            if (data.uploadError) msg += '\nAirtable note: ' + data.uploadError;
+            msg += renderSwaps(data.swaps);
+            msg +=
+              '\n\n<div class="actions">' +
+              '<a href="' + data.fileUrl + '" target="_blank"><button type="button">Download</button></a>' +
+              '<a href="' + data.openFolderUrl + '" target="_blank"><button type="button" class="secondary">Show in Explorer</button></a>' +
+              '</div>';
+            showStatus(msg, 'ok');
+          } else {
+            showStatus('Error: ' + data.error, 'err');
+          }
+        } catch (e) {
+          showStatus('Request failed: ' + e.message, 'err');
+        } finally {
+          goBtn.disabled = false;
+        }
+      }
+
+      refreshBtn.addEventListener('click', loadTemplates);
+      openFolderBtn.addEventListener('click', function () { window.open('/open-templates', '_blank'); });
+      goBtn.addEventListener('click', generate);
+      recInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') generate(); });
+
+      // Pre-fill from URL (used by the Airtable button)
+      const params = new URLSearchParams(window.location.search);
+      const preset = params.get('recordId');
+      if (preset) recInput.value = preset;
+      const presetTpl = params.get('template');
+
+      async function fetchRecordTemplate(recordId) {
+        try {
+          const res = await fetch('/record-info/' + encodeURIComponent(recordId));
+          if (!res.ok) return null;
+          const data = await res.json();
+          return data.template || null;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function trySelect(value) {
+        if (!value) return false;
+        const opt = Array.from(tplSel.options).find(function (o) { return o.value === value; });
+        if (opt) { tplSel.value = value; return true; }
+        return false;
+      }
+
+      loadTemplates().then(async function () {
+        // Priority: URL ?template= > record's Template field > first option
+        let chosen = null;
+        if (presetTpl && trySelect(presetTpl)) chosen = presetTpl;
+        if (!chosen && preset) {
+          const fromRecord = await fetchRecordTemplate(preset);
+          if (fromRecord && trySelect(fromRecord)) chosen = fromRecord;
+          else if (fromRecord) {
+            showStatus(
+              'Record has Template = "' + fromRecord + '" but that file is not in the local folder.\n' +
+              'Click "Open folder" and add it, or click Refresh Templates in Airtable.',
+              'err'
+            );
+          }
+        }
+        // Auto-fire when ?auto=1 and we have both a record and a resolved template
+        if (preset && params.get('auto') === '1' && (chosen || tplSel.value)) generate();
+      });
+    </script>
+  </body>
+</html>

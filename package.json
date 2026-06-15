@@ -1,0 +1,20 @@
+{
+  "name": "airtable-agent",
+  "version": "1.0.0",
+  "description": "AI-powered document agent for Airtable (fills Word/Excel templates with record data via Claude)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "docx": "^8.5.0",
+    "docxtemplater": "^3.50.0",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^1.1.1",
+    "pizzip": "^3.1.6",
+    "xlsx": "^0.18.5"
+  }
+}

@@ -1,0 +1,8 @@
+.env
+node_modules/
+logs/
+work/
+output/
+backup-*/
+*.log
+bad-claude-*.txt
