@@ -653,6 +653,13 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
         dlog(`[cfg-debug] dropped grammar-risk swap: ${JSON.stringify(old)} -> ${JSON.stringify(next)}`);
         return false;
       }
+      const statutoryThreshold =
+        /\b(or more|no more than|fewer than|at least|not less than|more than ten|fewer than one hundred|100 or more|150 or more|six or more)\b/i.test(old) ||
+        /\b(wage requirements|prevailing wages|affordability option|AMI|dwelling units)\b/i.test(old);
+      if (statutoryThreshold && /\b(residential|commercial).*\bunits?\b|\bcommercial space\b/i.test(next)) {
+        dlog(`[cfg-debug] dropped statutory-threshold swap: ${JSON.stringify(old)} -> ${JSON.stringify(next)}`);
+        return false;
+      }
       return true;
     });
   }
@@ -708,7 +715,7 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
       const b = asString(getField(recordFields, 'Borough'));
       return b ? `${b}, NY` : '';
     })() },
-    { brackets: ['[Total Gross Square Feet]', '[Gross Square Feet]', '[GSF]'], value: asString(getField(recordFields, 'Gross SQFT') || getField(recordFields, 'Total GSF') || getField(recordFields, 'GSF')) },
+    { brackets: ['[Residential Gross SQFT]', '[Total Gross Square Feet]', '[Gross Square Feet]', '[GSF]'], value: asString(getField(recordFields, 'Residential Gross SQFT') || getField(recordFields, 'Gross SQFT') || getField(recordFields, 'Total GSF') || getField(recordFields, 'GSF')) },
     { brackets: ['[Units]', '[Number of Units]', '[Unit Count]'], value: asString(getField(recordFields, 'Units')) },
     { brackets: ['[Commercial Gross SQFT]', '[Commercial Gross Sq Ft]', '[Commercial Square Feet]', '[Commercial GSF]'], value: asString(getField(recordFields, 'Commercial Gross SQFT')) },
     { brackets: ['[ICAP Term]', '[ICAP Years]', '[Abatement Term]'], value: projectFacts && projectFacts.icap ? asString(projectFacts.icap.term) : '' }

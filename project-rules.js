@@ -413,6 +413,12 @@ function inspectGeneratedDocxText(text, fields, facts) {
   if (!grossSqft && /\baggregate\s+[\d,.\s]+gross square feet\b/i.test(body)) {
     warnings.push('Gross-square-foot sentence remains even though Airtable has no Residential Gross SQFT value.');
   }
+  if (!grossSqft && /\baggregate\s+\[[^\]]*gross[^\]]*\]\s+gross square feet\b/i.test(body)) {
+    warnings.push('Gross-square-foot placeholder remains even though Airtable has no Residential Gross SQFT value.');
+  }
+  if (/For buildings with\s+\d+\s+residential[^.]*\s+or more/i.test(body)) {
+    warnings.push('Possible statutory unit threshold was replaced with the project summary.');
+  }
   if (/\[\[[^\]]+\]\]/.test(body)) {
     warnings.push('Unresolved [[...]] template marker or placeholder remains.');
   }
@@ -501,8 +507,8 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   }
 
   const grossSqft = getFactsValue('Residential Gross SQFT', fields, facts);
-  const aggregateGrossSqftSentence = body.match(/The building will aggregate\s+[\d,.\s]*gross square feet\.?/i);
-  if (/\baggregate\s+[\d,.\s]*gross square feet\b/i.test(body)) {
+  const aggregateGrossSqftSentence = body.match(/The building will aggregate\s+(?:[\d,.\s]*|\[[^\]]+\]\s*)gross square feet\.?/i);
+  if (/\baggregate\s+(?:[\d,.\s]*|\[[^\]]+\]\s*)gross square feet\b/i.test(body)) {
     if (grossSqft) {
       add(
         'Gross SQFT Cleanup',
@@ -557,6 +563,16 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     if (line && /commercial space\s+and\s+commercial space/i.test(line[0])) {
       add('Property Summary Cleanup', line[0], line[0].replace(/commercial space\s+and\s+commercial space/ig, 'commercial space'), 'Cleaned property summary duplicate');
     }
+  }
+
+  const badWageThreshold = body.match(/For buildings with\s+\d+\s+residential[^.]*?\s+or more,/i);
+  if (badWageThreshold) {
+    add(
+      'Statutory Threshold Cleanup',
+      badWageThreshold[0],
+      'For buildings with 100 or more dwelling units,',
+      'Restored statutory wage threshold that should not use project unit count'
+    );
   }
 
   return swaps;
