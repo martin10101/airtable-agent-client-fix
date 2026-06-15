@@ -422,6 +422,9 @@ function inspectGeneratedDocxText(text, fields, facts) {
   if (facts && facts.units != null && facts.units < 100 && /Affordability Option B \(applicable for projects comprising 100 or more dwelling units\)/i.test(body)) {
     warnings.push('Affordability Option B bracket is wrong for a project with fewer than 100 units.');
   }
+  if (facts && facts.units != null && facts.units < 100 && /Affordability Option B \(applicable for projects comprising 6 to 99 dwelling units\s+or more\)/i.test(body)) {
+    warnings.push('Affordability Option B bracket contains an invalid "6 to 99 ... or more" range.');
+  }
   const owner = asString(getField(fields, 'Owner'));
   if (owner && new RegExp(`Sincerely yours[\\s\\S]{0,120}${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,120}Metropolitan Realty`, 'i').test(body)) {
     warnings.push('Signature block appears to contain the Owner instead of the firm signer.');
@@ -644,6 +647,18 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       'Affordability Option B (applicable for projects comprising 100 or more dwelling units)',
       'Affordability Option B (applicable for projects comprising 6 to 99 dwelling units)',
       'Restored Option B bracket for fewer than 100 units'
+    );
+    add(
+      'Affordability Option Cleanup',
+      'Affordability Option B (applicable for projects comprising 6 to 99 dwelling units or more)',
+      'Affordability Option B (applicable for projects comprising 6 to 99 dwelling units)',
+      'Removed invalid "or more" from Option B bracket range'
+    );
+    add(
+      'Affordability Option Cleanup',
+      'projects comprising 6 to 99 dwelling units or more',
+      'projects comprising 6 to 99 dwelling units',
+      'Removed invalid "or more" from Option B bracket range'
     );
   }
 
