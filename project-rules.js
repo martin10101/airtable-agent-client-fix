@@ -403,6 +403,10 @@ function inspectGeneratedDocxText(text, fields, facts) {
   if (/commercial space\s+and\s+commercial space/i.test(body)) {
     warnings.push('Duplicate commercial language found: "commercial space and commercial space".');
   }
+  const commercialSqft = getFactsValue('Commercial Gross SQFT', fields, facts);
+  if (!commercialSqft && /\band\s+[\d,]+(?:\.\d+)?\s+square feet of commercial space/i.test(body)) {
+    warnings.push('Commercial square-foot value remains even though Airtable has no Commercial Gross SQFT value.');
+  }
   if (/\ba\s+\d+\s+residential/i.test(body)) {
     warnings.push('Bad grammar found: "a [number] residential...".');
   }
@@ -491,6 +495,39 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     'commercial space',
     'Removed duplicate commercial language'
   );
+
+  const commercialSqft = getFactsValue('Commercial Gross SQFT', fields, facts);
+  if (!commercialSqft) {
+    const staleCommercialSqftRe = /\bcommercial space\s+and\s+[\d,]+(?:\.\d+)?\s+square feet of commercial space/gi;
+    let commercialSqftMatch;
+    let foundFullCommercialSqftPhrase = false;
+    while ((commercialSqftMatch = staleCommercialSqftRe.exec(body)) !== null) {
+      foundFullCommercialSqftPhrase = true;
+      add(
+        'Commercial SQFT Cleanup',
+        commercialSqftMatch[0],
+        'commercial space',
+        'Removed commercial-square-foot phrase because Airtable has no Commercial Gross SQFT value'
+      );
+    }
+    if (!foundFullCommercialSqftPhrase) {
+      const staleCommercialTailRe = /\s+and\s+[\d,]+(?:\.\d+)?\s+square feet of commercial space/gi;
+      while ((commercialSqftMatch = staleCommercialTailRe.exec(body)) !== null) {
+        add(
+          'Commercial SQFT Cleanup',
+          commercialSqftMatch[0],
+          ' ',
+          'Removed commercial-square-foot phrase because Airtable has no Commercial Gross SQFT value'
+        );
+      }
+    }
+    add(
+      'Commercial SQFT Cleanup',
+      'commercial space and square feet of commercial space',
+      'commercial space',
+      'Removed incomplete commercial-square-foot phrase'
+    );
+  }
 
   const badArticleRe = /\ba\s+(\d+\s+residential[^\r\n.]*)/gi;
   let m;
