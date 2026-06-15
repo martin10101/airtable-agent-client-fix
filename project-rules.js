@@ -419,6 +419,9 @@ function inspectGeneratedDocxText(text, fields, facts) {
   if (/For buildings with\s+\d+\s+residential[^.]*\s+or more/i.test(body)) {
     warnings.push('Possible statutory unit threshold was replaced with the project summary.');
   }
+  if (facts && facts.units != null && facts.units < 100 && /(?:construction wage requirements|building service employees|prevailing wages)[^.]{0,240}(?:100 or more|150 or more)|(?:100 or more|150 or more)[^.]{0,240}(?:construction wage requirements|building service employees|prevailing wages)/i.test(body)) {
+    warnings.push('A 100+ wage paragraph remains in an under-100-unit letter.');
+  }
   if (facts && facts.units != null && facts.units < 100 && /Affordability Option B \(applicable for projects comprising 100 or more dwelling units\)/i.test(body)) {
     warnings.push('Affordability Option B bracket is wrong for a project with fewer than 100 units.');
   }
@@ -602,8 +605,9 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     }
   }
 
+  const under100Project = facts && facts.units != null && facts.units < 100;
   const badWageSentence = body.match(/For buildings with\s+\d+\s+residential[^\r\n.]*?\s+or more,\s+all building service employees/i);
-  if (badWageSentence) {
+  if (badWageSentence && !under100Project) {
     add(
       'Statutory Threshold Cleanup',
       badWageSentence[0],
@@ -613,7 +617,7 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   }
 
   const badWageThreshold = body.match(/For buildings with\s+\d+\s+residential[^\r\n.]*?\s+or more,/i);
-  if (badWageThreshold) {
+  if (badWageThreshold && !under100Project) {
     add(
       'Statutory Threshold Cleanup',
       badWageThreshold[0],
@@ -623,7 +627,7 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   }
 
   const badWageCore = body.match(/\d+\s+residential[^\r\n.]*?\s+or more/i);
-  if (badWageCore && /building service employees|prevailing wages/i.test(body)) {
+  if (badWageCore && !under100Project && /building service employees|prevailing wages/i.test(body)) {
     add(
       'Statutory Threshold Cleanup',
       badWageCore[0],
@@ -631,13 +635,39 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       'Restored short statutory wage threshold fragment'
     );
   }
-  if (facts && facts.units != null) {
+  if (facts && facts.units != null && !under100Project) {
     const summaryThreshold = `${projectSummary(fields, facts)} or more`;
     add(
       'Statutory Threshold Cleanup',
       summaryThreshold,
       '100 or more dwelling units',
       'Restored statutory wage threshold fragment'
+    );
+  }
+  if (under100Project) {
+    add(
+      'Wage Paragraph Cleanup',
+      'Under the ANNY Rules, for any eligible site containing 100 or more dwelling units, regardless of location within New York City, the applicant must comply with specific construction wage requirements for workers at an Eligible Site.',
+      '',
+      'Removed 100+ construction wage paragraph for under-100-unit project'
+    );
+    add(
+      'Wage Paragraph Cleanup',
+      'Eligible sites containing 150 or more dwelling units that are located in Zone A or Zone B are subject to higher minimum construction wage floors.',
+      '',
+      'Removed 150+ construction wage sentence for under-100-unit project'
+    );
+    add(
+      'Wage Paragraph Cleanup',
+      'For buildings with 100 or more dwelling units, all building service employees',
+      '',
+      'Removed 100+ building-service wage paragraph for under-100-unit project'
+    );
+    add(
+      'Wage Paragraph Cleanup',
+      `For buildings with ${projectSummary(fields, facts)} or more, all building service employees`,
+      '',
+      'Removed project-specific rewrite of 100+ wage paragraph for under-100-unit project'
     );
   }
 
