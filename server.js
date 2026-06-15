@@ -32,7 +32,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-15-signature-keep-v7';
+const APP_VERSION = '2026-06-15-iterative-cleanup-v8';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -614,14 +614,18 @@ app.post('/generate', async (req, res) => {
         log('Missed swaps (old value not located in doc):', result.missed.map((s) => s.oldValue));
       }
       let outputText = docxHandler.extractDocxText(outputPath);
-      const cleanupSwaps = projectRules.buildPostGenerationCleanupSwaps(outputText, fields, projectFacts, { log });
-      let cleanupResult = null;
-      if (cleanupSwaps.length) {
-        log(`Applying ${cleanupSwaps.length} post-generation cleanup swap(s)`);
-        cleanupResult = docxHandler.fillDocxSwaps(outputPath, cleanupSwaps, outputPath, { log });
-        log(`Cleanup applied ${cleanupResult.applied.length}; missed ${cleanupResult.missed.length}`);
+      const cleanupPasses = [];
+      for (let pass = 1; pass <= 3; pass++) {
+        const cleanupSwaps = projectRules.buildPostGenerationCleanupSwaps(outputText, fields, projectFacts, { log });
+        if (!cleanupSwaps.length) break;
+        log(`Applying ${cleanupSwaps.length} post-generation cleanup swap(s), pass ${pass}`);
+        const cleanupResult = docxHandler.fillDocxSwaps(outputPath, cleanupSwaps, outputPath, { log });
+        log(`Cleanup pass ${pass} applied ${cleanupResult.applied.length}; missed ${cleanupResult.missed.length}`);
+        cleanupPasses.push({ pass, ...cleanupResult });
         outputText = docxHandler.extractDocxText(outputPath);
+        if (!cleanupResult.applied.length) break;
       }
+      const cleanupResult = cleanupPasses.length ? cleanupPasses : null;
       const qualityWarnings = projectRules.inspectGeneratedDocxText(outputText, fields, projectFacts);
       if (qualityWarnings.length) {
         log('[WARN] Output quality warnings:', qualityWarnings);
