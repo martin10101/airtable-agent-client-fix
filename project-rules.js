@@ -565,7 +565,17 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     }
   }
 
-  const badWageThreshold = body.match(/For buildings with\s+\d+\s+residential[^.]*?\s+or more,/i);
+  const badWageSentence = body.match(/For buildings with\s+\d+\s+residential[^\r\n.]*?\s+or more,\s+all building service employees/i);
+  if (badWageSentence) {
+    add(
+      'Statutory Threshold Cleanup',
+      badWageSentence[0],
+      'For buildings with 100 or more dwelling units, all building service employees',
+      'Restored statutory wage threshold sentence that should not use project unit count'
+    );
+  }
+
+  const badWageThreshold = body.match(/For buildings with\s+\d+\s+residential[^\r\n.]*?\s+or more,/i);
   if (badWageThreshold) {
     add(
       'Statutory Threshold Cleanup',

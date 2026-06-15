@@ -577,6 +577,14 @@ function addRuleBackstopSwaps(swaps, templateText, projectFacts, log) {
   return out;
 }
 
+function looksLikeStatutoryThreshold(text) {
+  const s = String(text || '');
+  return (
+    /\b(or more|no more than|fewer than|at least|not less than|more than ten|fewer than one hundred|100 or more|150 or more|six or more)\b/i.test(s) ||
+    /\b(wage requirements|prevailing wages|affordability option|AMI|dwelling units|eligible site|modest rental projects?)\b/i.test(s)
+  );
+}
+
 async function mapDocxSwaps(templateText, recordFields, schema, opts) {
   opts = opts || {};
   const data = sanitizeRecordFields(
@@ -653,10 +661,7 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
         dlog(`[cfg-debug] dropped grammar-risk swap: ${JSON.stringify(old)} -> ${JSON.stringify(next)}`);
         return false;
       }
-      const statutoryThreshold =
-        /\b(or more|no more than|fewer than|at least|not less than|more than ten|fewer than one hundred|100 or more|150 or more|six or more)\b/i.test(old) ||
-        /\b(wage requirements|prevailing wages|affordability option|AMI|dwelling units)\b/i.test(old);
-      if (statutoryThreshold && /\b(residential|commercial).*\bunits?\b|\bcommercial space\b/i.test(next)) {
+      if (looksLikeStatutoryThreshold(old) && /\b(residential|commercial).*\bunits?\b|\bcommercial space\b/i.test(next)) {
         dlog(`[cfg-debug] dropped statutory-threshold swap: ${JSON.stringify(old)} -> ${JSON.stringify(next)}`);
         return false;
       }
@@ -686,6 +691,10 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
       const exact = String((claim && claim.exactText) || '').trim();
       if (!exact || exact === synth) { dlog(`[cfg-debug]   skip (empty or identical to synth): ${JSON.stringify(exact.slice(0,60))}`); continue; }
       if (!templateText.includes(exact)) { dlog(`[cfg-debug]   skip (not in templateText): ${JSON.stringify(exact.slice(0,60))}`); continue; }
+      if (looksLikeStatutoryThreshold(exact)) {
+        dlog(`[cfg-debug]   skip (statutory threshold, not project config): ${JSON.stringify(exact.slice(0,80))}`);
+        continue;
+      }
       if (looksLikeSentence(exact)) {
         dlog(`[cfg-debug]   skip (looks like a sentence, not a label-line summary): ${JSON.stringify(exact.slice(0,80))}`);
         continue;
