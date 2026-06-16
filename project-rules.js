@@ -319,6 +319,18 @@ function permitWorkTerm(facts) {
 
 function getFactsValue(token, fields, facts) {
   const key = normalizeToken(token);
+  const aiAnswer = aiAnswersText(fields);
+  const aiAnswerOwnsProjectGross = !!aiAnswer;
+  const projectGrossKeys = new Set([
+    'residentialgrosssqft',
+    'grosssqft',
+    'grosssqftdescription',
+    'grosssquarefeetdescription',
+    'totalgsf',
+    'commercialgrosssqft',
+    'commercialsqft'
+  ]);
+  if (aiAnswerOwnsProjectGross && projectGrossKeys.has(key)) return '';
   const borough = normalizeBorough(getField(fields, 'Borough'));
   const block = asString(getField(fields, 'Block'));
   const lot = asString(getField(fields, 'Lot'));
@@ -752,7 +764,15 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   const grossSqft = getFactsValue('Residential Gross SQFT', fields, facts);
   const grossSqftText = grossSqftDescription(fields);
   const aggregateGrossSqftSentence = body.match(/The building will aggregate\s+(?:[\d,.\s]*|\[[^\]]+\]\s*)gross square feet\.?/i);
-  if (/\baggregate\s+(?:[\d,.\s]*|\[[^\]]+\]\s*)gross square feet\b/i.test(body)) {
+  const hasAggregateGrossSqftSentence = /\baggregate\s+(?:[\d,.\s]*|\[[^\]]+\]\s*)gross square feet\b/i.test(body);
+  if (aiAnswer) {
+    addMatchingParagraphs(
+      'AI Answers Project Detail',
+      /^(?:\d+[\).]\s*)?(?:(?:The|This)\s+)?(?:proposed\s+)?building[^\r\n.]{0,120}\b(?:aggregate|aggregates|have|has|contain|contains|consist|consists)[^\r\n.]*\b(?:gross\s+(?:square\s+feet|floor\s+area)|square feet|residential\s+(?:gross\s+)?(?:area|space|square feet)|commercial\s+(?:gross\s+)?(?:area|space|square feet)|community facility|parking|bicycle)[^\r\n.]*\.?$/i,
+      '',
+      'Removed separate gross-square-foot project-detail line because AI Answers supplies it'
+    );
+  } else if (hasAggregateGrossSqftSentence) {
     if (grossSqftText) {
       add(
         'Gross SQFT Cleanup',

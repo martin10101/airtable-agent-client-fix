@@ -319,6 +319,15 @@ function asString(v) {
   return String(v);
 }
 
+function aiAnswersText(fields) {
+  const raw =
+    getField(fields, 'AI Answers') ??
+    getField(fields, 'AI Answer') ??
+    getField(fields, 'AI answers') ??
+    getField(fields, 'AI answer');
+  return asString(raw).replace(/\s+/g, ' ').trim();
+}
+
 function synthesizeProjectDetails(fields, projectFacts) {
   const bt = asString(getField(fields, 'Building Type')).toLowerCase().trim();
   const cr = asString(getField(fields, 'Condo/Rental')).toLowerCase().trim();
@@ -440,7 +449,8 @@ const DOCX_ANALYSIS_TOOL = {
 
 // Phase 1: swap mode for Word docs — find old project values, replace with
 // the new project's values. Returns an array of { fieldName, oldValue, newValue }.
-function formatProjectFactsForPrompt(projectFacts) {
+function formatProjectFactsForPrompt(projectFacts, opts) {
+  opts = opts || {};
   if (!projectFacts || typeof projectFacts !== 'object') return '';
   const lines = [];
 
@@ -453,7 +463,7 @@ function formatProjectFactsForPrompt(projectFacts) {
   }
 
   lines.push(`Has commercial: ${projectFacts.hasCommercialText || (projectFacts.hasCommercial ? 'Yes' : 'No')}`);
-  if (projectFacts.commercialGrossSqft != null) {
+  if (!opts.suppressProjectGrossSqft && projectFacts.commercialGrossSqft != null) {
     lines.push(`Commercial Gross SQFT: ${projectFacts.commercialGrossSqft}`);
   }
   if (projectFacts.permitType && projectFacts.permitType.raw) {
@@ -601,16 +611,30 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
 
   const dlog = (opts && typeof opts.log === 'function') ? opts.log : (() => {});
   const projectFacts = opts.projectFacts || {};
+  const aiAnswer = aiAnswersText(recordFields);
+  if (aiAnswer) {
+    for (const key of Object.keys(data)) {
+      if (/^(Residential Gross SQFT|Commercial Gross SQFT|Gross SQFT|Total GSF|GSF)$/i.test(key.trim())) {
+        delete data[key];
+      }
+    }
+  }
   const markedTargets = Array.isArray(opts.markedTargets) ? opts.markedTargets : [];
   const synth = synthesizeProjectDetails(recordFields, projectFacts);
   dlog(`[cfg-debug] Building Type field: ${JSON.stringify(getField(recordFields, 'Building Type'))}`);
   dlog(`[cfg-debug] Condo/Rental field: ${JSON.stringify(getField(recordFields, 'Condo/Rental'))}`);
   dlog(`[cfg-debug] Units field: ${JSON.stringify(getField(recordFields, 'Units'))}`);
   dlog(`[cfg-debug] Commercial Gross SQFT field: ${JSON.stringify(getField(recordFields, 'Commercial Gross SQFT'))}`);
+  if (aiAnswer) dlog('[cfg-debug] AI Answers present: suppressing Residential/Commercial Gross SQFT as project-detail sources');
   dlog(`[rule-debug] Project facts: ${JSON.stringify(projectFacts)}`);
   dlog(`[mark-debug] Yellow/red marked targets found: ${markedTargets.length}`);
   dlog(`[cfg-debug] Synthesized phrase: ${JSON.stringify(synth)}`);
-  const factsLine = formatProjectFactsForPrompt(projectFacts);
+  const factsLine = formatProjectFactsForPrompt(projectFacts, { suppressProjectGrossSqft: !!aiAnswer });
+  const aiAnswerLine = aiAnswer
+    ? `\n\nAI ANSWERS PROJECT DETAIL OVERRIDE:\n` +
+      `The record has AI Answers. Treat AI Answers as the source for the numbered Project details paragraph. ` +
+      `Do not use Residential Gross SQFT, Commercial Gross SQFT, Total GSF, or GSF to create or fill a separate gross-square-foot project-detail sentence.\n`
+    : '';
   const markedLine = formatMarkedTargetsForPrompt(markedTargets);
   const synthLine = synth
     ? `\n\nSYNTHESIZED BUILDING CONFIGURATION (computed from Airtable Building Type / Condo/Rental / Units): "${synth}"\n` +
@@ -632,6 +656,7 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
     `NEW RECORD DATA (JSON, values for the NEW project only — any field missing ` +
     `here should NOT be swapped):\n${JSON.stringify(data, null, 2)}` +
     factsLine +
+    aiAnswerLine +
     synthLine +
     markedLine + `\n\n` +
     `TEMPLATE TEXT (the OLD project's filled-in document):\n"""\n${templateText}\n"""\n\n` +
@@ -648,6 +673,16 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
     s && typeof s.oldValue === 'string' && s.oldValue.length &&
     typeof s.newValue === 'string' && s.oldValue !== s.newValue
   );
+  if (aiAnswer) {
+    swaps = swaps.filter((s) => {
+      const field = String(s.fieldName || '');
+      if (/\b(?:Residential Gross SQFT|Commercial Gross SQFT|Gross SQFT|Total GSF|GSF|gross square feet|square footage)\b/i.test(field)) {
+        dlog(`[cfg-debug] dropped gross-SQFT swap because AI Answers is present: ${JSON.stringify(s.oldValue.slice(0, 100))}`);
+        return false;
+      }
+      return true;
+    });
+  }
   if (synth) {
     swaps = swaps.filter((s) => {
       const old = String(s.oldValue || '');
@@ -728,9 +763,9 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
       const b = asString(getField(recordFields, 'Borough'));
       return b ? `${b}, NY` : '';
     })() },
-    { brackets: ['[Residential Gross SQFT]', '[Total Gross Square Feet]', '[Gross Square Feet]', '[GSF]'], value: asString(getField(recordFields, 'Residential Gross SQFT') || getField(recordFields, 'Gross SQFT') || getField(recordFields, 'Total GSF') || getField(recordFields, 'GSF')) },
+    { brackets: ['[Residential Gross SQFT]', '[Total Gross Square Feet]', '[Gross Square Feet]', '[GSF]'], value: aiAnswer ? '' : asString(getField(recordFields, 'Residential Gross SQFT') || getField(recordFields, 'Gross SQFT') || getField(recordFields, 'Total GSF') || getField(recordFields, 'GSF')) },
     { brackets: ['[Units]', '[Number of Units]', '[Unit Count]'], value: asString(getField(recordFields, 'Units')) },
-    { brackets: ['[Commercial Gross SQFT]', '[Commercial Gross Sq Ft]', '[Commercial Square Feet]', '[Commercial GSF]'], value: asString(getField(recordFields, 'Commercial Gross SQFT')) },
+    { brackets: ['[Commercial Gross SQFT]', '[Commercial Gross Sq Ft]', '[Commercial Square Feet]', '[Commercial GSF]'], value: aiAnswer ? '' : asString(getField(recordFields, 'Commercial Gross SQFT')) },
     { brackets: ['[ICAP Term]', '[ICAP Years]', '[Abatement Term]'], value: projectFacts && projectFacts.icap ? asString(projectFacts.icap.term) : '' }
   ];
   for (const map of placeholderMap) {

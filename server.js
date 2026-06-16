@@ -32,7 +32,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-16-ai-answer-filename-docx-v14';
+const APP_VERSION = '2026-06-16-ai-answer-diagnostics-v15';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -570,6 +570,7 @@ app.post('/generate', async (req, res) => {
 
     // Dispatch by file type
     let swapSummary = null;
+    let docxValidation = null;
     if (ext === '.docx') {
       const docxContext = docxHandler.extractDocxContext(templatePath);
       const templateText = docxContext.text;
@@ -639,7 +640,13 @@ app.post('/generate', async (req, res) => {
       if (qualityWarnings.length) {
         log('[WARN] Output quality warnings:', qualityWarnings);
       }
-      swapSummary = { applied: result.applied, missed: result.missed, cleanup: cleanupResult, qualityWarnings };
+      docxValidation = docxHandler.validateDocx(outputPath);
+      if (docxValidation.ok) {
+        log(`[docx-check] OK: ${docxValidation.checkedParts} XML part(s) checked; no invalid XML or paragraph-property order issue found.`);
+      } else {
+        log(`[WARN] DOCX validation found ${docxValidation.problems.length} issue(s) in ${path.basename(outputPath)}:`, docxValidation.problems);
+      }
+      swapSummary = { applied: result.applied, missed: result.missed, cleanup: cleanupResult, qualityWarnings, docxValidation };
     } else if (ext === '.xlsx') {
       const workbookJson = await xlsxHandler.extractXlsxContent(templatePath);
       log(`Workbook JSON length: ${workbookJson.length} chars. Fetching table schema...`);
@@ -702,6 +709,7 @@ app.post('/generate', async (req, res) => {
       uploadedToAirtable,
       uploadError,
       swaps: swapSummary,
+      docxValidation,
       elapsedSeconds: Number(elapsed)
     });
   } catch (err) {

@@ -21,6 +21,162 @@ function sanitizeXmlText(s) {
     .replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '$1');
 }
 
+function xmlExcerpt(xml, index) {
+  const start = Math.max(0, index - 50);
+  const end = Math.min(xml.length, index + 50);
+  return xml
+    .slice(start, end)
+    .replace(/\s+/g, ' ')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '?');
+}
+
+function findIllegalXmlCharacters(xml, partName) {
+  const problems = [];
+  for (let i = 0; i < xml.length; i++) {
+    const code = xml.charCodeAt(i);
+    let type = '';
+    if ((code >= 0x00 && code <= 0x08) || code === 0x0B || code === 0x0C || (code >= 0x0E && code <= 0x1F)) {
+      type = 'illegal XML control character';
+    } else if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = xml.charCodeAt(i + 1);
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        i++;
+        continue;
+      }
+      type = 'unpaired high surrogate';
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      type = 'unpaired low surrogate';
+    }
+    if (!type) continue;
+    problems.push({
+      part: partName,
+      type,
+      index: i,
+      code: `U+${code.toString(16).toUpperCase().padStart(4, '0')}`,
+      excerpt: xmlExcerpt(xml, i)
+    });
+    if (problems.length >= 10) break;
+  }
+  return problems;
+}
+
+function findInvalidXmlEntities(xml, partName) {
+  const problems = [];
+  const entityRe = /&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9A-Fa-f]+);)/g;
+  let match;
+  while ((match = entityRe.exec(xml)) !== null) {
+    problems.push({
+      part: partName,
+      type: 'invalid XML entity',
+      index: match.index,
+      excerpt: xmlExcerpt(xml, match.index)
+    });
+    if (problems.length >= 10) break;
+  }
+  return problems;
+}
+
+function getDomParser() {
+  try {
+    return require('@xmldom/xmldom').DOMParser;
+  } catch (_) {
+    return null;
+  }
+}
+
+function validateXmlWellFormed(xml, partName) {
+  const DOMParser = getDomParser();
+  if (!DOMParser) return [];
+  const problems = [];
+  const parser = new DOMParser({
+    onError: (level, message) => {
+      problems.push({
+        part: partName,
+        type: level === 'fatalError'
+          ? 'xml fatal parse error'
+          : (level === 'warning' ? 'xml parse warning' : 'xml parse error'),
+        message: String(message)
+      });
+    }
+  });
+  try {
+    parser.parseFromString(xml, 'application/xml');
+  } catch (e) {
+    problems.push({ part: partName, type: 'xml parse exception', message: e.message });
+  }
+  return problems.slice(0, 10);
+}
+
+function detectParagraphPropertyOrderIssues(xml, partName) {
+  const problems = [];
+  const pPrRe = /<w:pPr\b[\s\S]*?<\/w:pPr>/g;
+  let match;
+  while ((match = pPrRe.exec(xml)) !== null) {
+    const pPr = match[0];
+    const keep = Math.min(
+      ...['<w:keepNext', '<w:keepLines'].map((tag) => {
+        const idx = pPr.indexOf(tag);
+        return idx === -1 ? Number.POSITIVE_INFINITY : idx;
+      })
+    );
+    if (!Number.isFinite(keep)) continue;
+    const lateTags = ['<w:contextualSpacing', '<w:spacing', '<w:ind', '<w:jc', '<w:rPr', '<w:sectPr'];
+    const lateBeforeKeep = lateTags.find((tag) => {
+      const idx = pPr.indexOf(tag);
+      return idx !== -1 && idx < keep;
+    });
+    if (!lateBeforeKeep) continue;
+    problems.push({
+      part: partName,
+      type: 'word paragraph-property order',
+      message: `${lateBeforeKeep} appears before keepNext/keepLines`,
+      index: match.index,
+      excerpt: xmlExcerpt(xml, match.index)
+    });
+    if (problems.length >= 10) break;
+  }
+  return problems;
+}
+
+function validateDocx(filePath) {
+  const result = { ok: true, checkedParts: 0, problems: [] };
+  let zip;
+  try {
+    zip = new PizZip(fs.readFileSync(filePath));
+  } catch (e) {
+    return {
+      ok: false,
+      checkedParts: 0,
+      problems: [{ part: '(zip)', type: 'docx zip read error', message: e.message }]
+    };
+  }
+
+  for (const name of Object.keys(zip.files)) {
+    const entry = zip.files[name];
+    if (!entry || entry.dir || !/\.(xml|rels)$/i.test(name)) continue;
+    let xml = '';
+    try {
+      xml = entry.asText();
+    } catch (e) {
+      result.problems.push({ part: name, type: 'xml read error', message: e.message });
+      continue;
+    }
+    result.checkedParts++;
+    result.problems.push(...findIllegalXmlCharacters(xml, name));
+    result.problems.push(...findInvalidXmlEntities(xml, name));
+    result.problems.push(...validateXmlWellFormed(xml, name));
+    if (/^word\/.*\.xml$/i.test(name)) {
+      result.problems.push(...detectParagraphPropertyOrderIssues(xml, name));
+    }
+    if (result.problems.length >= 50) {
+      result.problems = result.problems.slice(0, 50);
+      break;
+    }
+  }
+  result.ok = result.problems.length === 0;
+  return result;
+}
+
 function decodeXml(s) {
   return String(s || '')
     .replace(/&amp;/g, '&')
@@ -247,22 +403,31 @@ function mergeSplitTargets(xml, targets) {
 }
 
 function addParagraphProperties(paragraph, props) {
+  const wantsKeepNext = !!props.keepNext || /<w:keepNext\b/.test(paragraph);
+  const wantsKeepLines = !!props.keepLines || /<w:keepLines\b/.test(paragraph);
   const inserts = [];
-  if (props.keepNext && !/<w:keepNext\b/.test(paragraph)) inserts.push('<w:keepNext/>');
-  if (props.keepLines && !/<w:keepLines\b/.test(paragraph)) inserts.push('<w:keepLines/>');
+  if (wantsKeepNext) inserts.push('<w:keepNext/>');
+  if (wantsKeepLines) inserts.push('<w:keepLines/>');
   if (!inserts.length) return paragraph;
 
   const insertXml = inserts.join('');
+  const stripExistingKeep = (pPr) => pPr
+    .replace(/<w:keepNext\b[^>]*(?:\/>|>[\s\S]*?<\/w:keepNext>)/g, '')
+    .replace(/<w:keepLines\b[^>]*(?:\/>|>[\s\S]*?<\/w:keepLines>)/g, '');
+  const insertIntoPPr = (pPr) => {
+    const cleaned = stripExistingKeep(pPr);
+    // WordprocessingML paragraph properties are order-sensitive. Insert after
+    // pStyle so Word does not repair the document, and normalize any existing
+    // keepNext/keepLines tags that older generated files may have misplaced.
+    const pStyle = '<w:pStyle\\b[^>]*(?:/>|>[\\s\\S]*?</w:pStyle>)';
+    const insertPoint = new RegExp(`(<w:pPr\\b[^>]*>\\s*(?:${pStyle}\\s*)?)`);
+    return cleaned.replace(insertPoint, `$1${insertXml}`);
+  };
   if (/<w:pPr\b/.test(paragraph)) {
     if (/<w:pPr\b[^>]*\/>/.test(paragraph)) {
       return paragraph.replace(/<w:pPr\b([^>]*)\/>/, `<w:pPr$1>${insertXml}</w:pPr>`);
     }
-    // WordprocessingML paragraph properties are order-sensitive. Insert after
-    // pStyle and any existing keepNext so Word does not repair the document.
-    const pStyle = '<w:pStyle\\b[^>]*(?:/>|>[\\s\\S]*?</w:pStyle>)';
-    const keepNext = '<w:keepNext\\b[^>]*(?:/>|>[\\s\\S]*?</w:keepNext>)';
-    const insertPoint = new RegExp(`(<w:pPr\\b[^>]*>\\s*(?:${pStyle}\\s*)?(?:${keepNext}\\s*)?)`);
-    return paragraph.replace(insertPoint, `$1${insertXml}`);
+    return paragraph.replace(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/, insertIntoPPr);
   }
   return paragraph.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${insertXml}</w:pPr>`);
 }
@@ -481,4 +646,4 @@ function fillDocxSwaps(templatePath, swaps, outputPath, opts) {
   return { outputPath, applied, missed };
 }
 
-module.exports = { extractDocxText, extractDocxMarkedTargets, extractDocxContext, fillDocxSwaps };
+module.exports = { extractDocxText, extractDocxMarkedTargets, extractDocxContext, fillDocxSwaps, validateDocx };
