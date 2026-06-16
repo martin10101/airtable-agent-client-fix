@@ -32,7 +32,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-15-ai-answer-spacing-v13';
+const APP_VERSION = '2026-06-16-ai-answer-filename-docx-v14';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -113,13 +113,18 @@ function safeFilename(name) {
 }
 
 function pickOutputBaseName(fields, templateName, recordId) {
-  const preferred =
-    fields[OUTPUT_NAME_FIELD] ||
-    fields['Property Address'] ||
-    fields['Address'] ||
-    fields['Project Address'];
-  if (preferred) {
-    const cleaned = safeFilename(preferred);
+  const candidateNames = [
+    'Property Address',
+    'Project Address',
+    'Address',
+    OUTPUT_NAME_FIELD
+  ].filter((name, index, arr) => name && arr.indexOf(name) === index);
+
+  for (const fieldName of candidateNames) {
+    const value = fields[fieldName];
+    const text = projectRules.asString ? projectRules.asString(value).trim() : String(value || '').trim();
+    if (!text) continue;
+    const cleaned = safeFilename(text);
     if (cleaned) return cleaned;
   }
   const ext = path.extname(templateName);

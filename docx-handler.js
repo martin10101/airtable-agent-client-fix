@@ -8,10 +8,17 @@ const DOCX_TEXT_TARGETS = [
 ];
 
 function escapeXml(s) {
-  return String(s)
+  return sanitizeXmlText(s)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function sanitizeXmlText(s) {
+  return String(s)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '')
+    .replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '$1');
 }
 
 function decodeXml(s) {
@@ -247,7 +254,15 @@ function addParagraphProperties(paragraph, props) {
 
   const insertXml = inserts.join('');
   if (/<w:pPr\b/.test(paragraph)) {
-    return paragraph.replace(/(<w:pPr\b[^>]*>)/, `$1${insertXml}`);
+    if (/<w:pPr\b[^>]*\/>/.test(paragraph)) {
+      return paragraph.replace(/<w:pPr\b([^>]*)\/>/, `<w:pPr$1>${insertXml}</w:pPr>`);
+    }
+    // WordprocessingML paragraph properties are order-sensitive. Insert after
+    // pStyle and any existing keepNext so Word does not repair the document.
+    const pStyle = '<w:pStyle\\b[^>]*(?:/>|>[\\s\\S]*?</w:pStyle>)';
+    const keepNext = '<w:keepNext\\b[^>]*(?:/>|>[\\s\\S]*?</w:keepNext>)';
+    const insertPoint = new RegExp(`(<w:pPr\\b[^>]*>\\s*(?:${pStyle}\\s*)?(?:${keepNext}\\s*)?)`);
+    return paragraph.replace(insertPoint, `$1${insertXml}`);
   }
   return paragraph.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${insertXml}</w:pPr>`);
 }

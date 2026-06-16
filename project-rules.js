@@ -576,10 +576,11 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   const addMatchingParagraphs = (fieldName, regex, newValue, reason) => {
     const seen = new Set();
     for (const raw of body.split(/\r?\n/)) {
-      const paragraph = raw.replace(/\s+/g, ' ').trim();
-      if (!paragraph || seen.has(paragraph) || !regex.test(paragraph)) continue;
-      seen.add(paragraph);
-      add(fieldName, paragraph, newValue, reason);
+      const oldValue = raw.trim();
+      const paragraph = oldValue.replace(/\s+/g, ' ').trim();
+      if (!oldValue || seen.has(oldValue) || !regex.test(paragraph)) continue;
+      seen.add(oldValue);
+      add(fieldName, oldValue, newValue, reason);
     }
   };
   const addMatchingText = (fieldName, regex, newValue, reason) => {
@@ -659,6 +660,12 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
         'Removed alternate project detail line because AI Answers supplies the combined detail'
       );
     }
+    addMatchingParagraphs(
+      'AI Answers Project Detail',
+      /^(?:\d+[\).]\s*)?(?:The\s+)?(?:proposed\s+)?building\s+(?:will\s+)?(?:have|contain|contains|aggregate|consist)[^\r\n]*?(?:gross|square feet|residential area|residential space|commercial area|community facility|parking|bicycle)[^\r\n]*\.?$/i,
+      '',
+      'Removed secondary project-detail/gross-area line because AI Answers supplies the combined detail'
+    );
   }
 
   const workTerm = permitWorkTerm(facts);
