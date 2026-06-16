@@ -138,6 +138,45 @@ function detectParagraphPropertyOrderIssues(xml, partName) {
   return problems;
 }
 
+function normalizeParagraphPropertyOrder(xml, log) {
+  let changed = 0;
+  const out = xml.replace(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/g, (pPr) => {
+    let keepNext = '';
+    let keepLines = '';
+    let touched = false;
+    let cleaned = pPr
+      .replace(/<w:keepNext\b[^>]*(?:\/>|>[\s\S]*?<\/w:keepNext>)/g, (tag) => {
+        if (!keepNext) keepNext = tag;
+        touched = true;
+        return '';
+      })
+      .replace(/<w:keepLines\b[^>]*(?:\/>|>[\s\S]*?<\/w:keepLines>)/g, (tag) => {
+        if (!keepLines) keepLines = tag;
+        touched = true;
+        return '';
+      });
+
+    if (!touched) return pPr;
+    const keepTags = `${keepNext}${keepLines}`;
+    let normalized;
+    const pStyleRe = /(<w:pPr\b[^>]*>\s*<w:pStyle\b[^>]*(?:\/>|>[\s\S]*?<\/w:pStyle>)\s*)/;
+    if (pStyleRe.test(cleaned)) {
+      normalized = cleaned.replace(pStyleRe, `$1${keepTags}`);
+    } else {
+      normalized = cleaned.replace(/(<w:pPr\b[^>]*>)/, `$1${keepTags}`);
+    }
+
+    if (normalized !== pPr) changed++;
+    return normalized;
+  });
+
+  if (changed) {
+    const dlog = typeof log === 'function' ? log : (() => {});
+    dlog(`[docx-fix] Normalized paragraph keepNext/keepLines order in ${changed} paragraph(s)`);
+  }
+  return out;
+}
+
 function validateDocx(filePath) {
   const result = { ok: true, checkedParts: 0, problems: [] };
   let zip;
@@ -629,6 +668,9 @@ function fillDocxSwaps(templatePath, swaps, outputPath, opts) {
       xml = removeDuplicateProjectedAssessedHeadings(xml, opts.log);
       xml = tidyBlankParagraphs(xml, opts.log);
       xml = keepSignatureBlockTogether(xml, opts.log);
+    }
+    if (/^word\/.*\.xml$/i.test(target)) {
+      xml = normalizeParagraphPropertyOrder(xml, opts.log);
     }
     zip.file(target, xml);
   }

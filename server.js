@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const express = require('express');
 
 // Load .env manually (no dotenv dependency)
@@ -32,7 +32,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-16-one-blank-spacing-v17';
+const APP_VERSION = '2026-06-16-word-repair-filename-v18';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -188,6 +188,95 @@ function openFile(filePath) {
     shell: true
   });
   child.unref();
+}
+
+function repairDocxWithWord(filePath, logFn) {
+  const dlog = typeof logFn === 'function' ? logFn : (() => {});
+  if (!/\.docx$/i.test(filePath)) return { skipped: true, reason: 'not a docx' };
+  if (/^(1|true|yes)$/i.test(String(process.env.DISABLE_WORD_REPAIR || ''))) {
+    return { skipped: true, reason: 'DISABLE_WORD_REPAIR is set' };
+  }
+
+  const scriptPath = path.join(WORK_DIR, 'word-repair-saveas.ps1');
+  const script = `
+param([Parameter(Mandatory=$true)][string]$Path)
+$ErrorActionPreference = "Stop"
+$word = $null
+$doc = $null
+$closed = $false
+$quit = $false
+$temp = [System.IO.Path]::Combine(
+  [System.IO.Path]::GetDirectoryName($Path),
+  ("~word-repair-" + [System.Guid]::NewGuid().ToString("N") + ".docx")
+)
+try {
+  $word = New-Object -ComObject Word.Application
+  $word.Visible = $false
+  $word.DisplayAlerts = 0
+  try { $word.AutomationSecurity = 3 } catch {}
+  $missing = [System.Reflection.Missing]::Value
+  $args = @($Path, $false, $false, $false, $missing, $missing, $false, $missing, $missing, $missing, $missing, $false, $true, $missing, $true, $missing)
+  $doc = $word.Documents.Open.Invoke($args)
+  if ($null -eq $doc) { throw "Word returned no document after repair open." }
+  $doc.SaveAs2($temp, 12)
+  $doc.Close($false)
+  $closed = $true
+  $word.Quit()
+  $quit = $true
+  if (!(Test-Path -LiteralPath $temp)) { throw "Word did not create repaired file: $temp" }
+  Move-Item -LiteralPath $temp -Destination $Path -Force
+  Write-Output ("OK " + (Split-Path -Leaf $Path))
+} finally {
+  if (($doc -ne $null) -and (-not $closed)) {
+    try { $doc.Close($false) } catch {}
+  }
+  if (($word -ne $null) -and (-not $quit)) {
+    try { $word.Quit() } catch {}
+  }
+  if ($doc -ne $null) {
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($doc) | Out-Null } catch {}
+  }
+  if ($word -ne $null) {
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null } catch {}
+  }
+  if (($temp -ne $null) -and (Test-Path -LiteralPath $temp)) {
+    try { Remove-Item -LiteralPath $temp -Force } catch {}
+  }
+  [GC]::Collect()
+  [GC]::WaitForPendingFinalizers()
+}
+`.trim();
+
+  try {
+    fs.writeFileSync(scriptPath, script, 'utf8');
+  } catch (e) {
+    dlog('[WARN] Could not write Word repair script:', e.message);
+    return { ok: false, error: e.message };
+  }
+
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', scriptPath,
+    filePath
+  ], {
+    encoding: 'utf8',
+    timeout: 90000,
+    windowsHide: true
+  });
+
+  const stdout = String(result.stdout || '').trim();
+  const stderr = String(result.stderr || '').trim();
+  if (result.error) {
+    dlog('[WARN] Word repair failed to run:', result.error.message);
+    return { ok: false, error: result.error.message, stdout, stderr };
+  }
+  if (result.status !== 0) {
+    dlog('[WARN] Word repair failed:', stderr || stdout || `exit ${result.status}`);
+    return { ok: false, status: result.status, stdout, stderr };
+  }
+  dlog('[word-repair] Repaired/saved DOCX before opening:', stdout || path.basename(filePath));
+  return { ok: true, stdout };
 }
 
 // If `targetPath` is locked (e.g. open in Word), pick the next available
@@ -571,6 +660,7 @@ app.post('/generate', async (req, res) => {
     // Dispatch by file type
     let swapSummary = null;
     let docxValidation = null;
+    let wordRepair = null;
     if (ext === '.docx') {
       const docxContext = docxHandler.extractDocxContext(templatePath);
       const templateText = docxContext.text;
@@ -684,6 +774,18 @@ app.post('/generate', async (req, res) => {
     }
 
     log('Written to:', outputPath);
+    if (ext === '.docx') {
+      wordRepair = repairDocxWithWord(outputPath, log);
+      if (wordRepair && wordRepair.ok) {
+        const afterWordRepairCheck = docxHandler.validateDocx(outputPath);
+        if (afterWordRepairCheck.ok) {
+          docxValidation = afterWordRepairCheck;
+          log(`[docx-check] OK after Word repair: ${afterWordRepairCheck.checkedParts} XML part(s) checked.`);
+        } else {
+          log('[WARN] DOCX validation after Word repair found issue(s):', afterWordRepairCheck.problems);
+        }
+      }
+    }
 
     // Open the file directly in its default app (Word/Excel/Adobe) so the user
     // can review immediately. File stays in its folder; we no longer upload a
@@ -710,6 +812,7 @@ app.post('/generate', async (req, res) => {
       uploadError,
       swaps: swapSummary,
       docxValidation,
+      wordRepair,
       elapsedSeconds: Number(elapsed)
     });
   } catch (err) {
