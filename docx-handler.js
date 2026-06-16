@@ -495,7 +495,15 @@ function isEmptyParagraph(paragraph) {
 }
 
 function isNumberedParagraph(paragraph) {
-  return /<w:numPr\b/i.test(paragraph);
+  return /<w:numPr\b/i.test(paragraph) || /<w:pStyle\b[^>]*w:val="[^"]*(?:List|Number|num|NoSpacing)[^"]*"/i.test(paragraph);
+}
+
+function nearestNonRemovedParagraph(paragraphs, index, direction, remove) {
+  for (let i = index + direction; i >= 0 && i < paragraphs.length; i += direction) {
+    if (remove && remove.has(i)) continue;
+    if (!paragraphs[i].empty) return paragraphs[i];
+  }
+  return null;
 }
 
 function tidyBlankParagraphs(xml, log) {
@@ -519,6 +527,15 @@ function tidyBlankParagraphs(xml, log) {
     if (!paragraphs[i].empty) continue;
     const prev = i > 0 ? paragraphs[i - 1] : null;
     if (prev && prev.empty && !remove.has(i - 1)) {
+      remove.add(i);
+      removed++;
+    }
+  }
+  for (let i = 0; i < paragraphs.length; i++) {
+    if (!paragraphs[i].empty || remove.has(i)) continue;
+    const prev = nearestNonRemovedParagraph(paragraphs, i, -1, remove);
+    const next = nearestNonRemovedParagraph(paragraphs, i, 1, remove);
+    if (prev && next && prev.numbered && next.numbered) {
       remove.add(i);
       removed++;
     }

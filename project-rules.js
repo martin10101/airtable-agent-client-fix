@@ -577,6 +577,7 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   opts = opts || {};
   const log = typeof opts.log === 'function' ? opts.log : (() => {});
   const body = String(text || '');
+  const aiAnswer = aiAnswersText(fields);
   const swaps = [];
   const add = (fieldName, oldValue, newValue, reason) => {
     if (!oldValue || swaps.some((s) => s.oldValue === oldValue && s.newValue === newValue)) return;
@@ -614,7 +615,7 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   );
 
   const commercialSqft = getFactsValue('Commercial Gross SQFT', fields, facts);
-  if (!commercialSqft) {
+  if (!aiAnswer && !commercialSqft) {
     const staleCommercialSqftRe = /\bcommercial space\s+and\s+[\d,]+(?:\.\d+)?\s+square feet of commercial space/gi;
     let commercialSqftMatch;
     let foundFullCommercialSqftPhrase = false;
@@ -652,7 +653,6 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     add('Quality Fix', m[0], m[1], 'Removed bad article before unit phrase');
   }
 
-  const aiAnswer = aiAnswersText(fields);
   const newBuildingLineForAi = body.match(/A new [^\r\n.]*building[^\r\n.]*will be constructed[^\r\n.]*\./i);
   const renovationLineForAi = body.match(/The project involves[^\r\n.]*(?:alteration|conversion|renovation)[^\r\n.]*\./i);
   if (aiAnswer && (newBuildingLineForAi || renovationLineForAi)) {

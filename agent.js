@@ -84,6 +84,11 @@ CRITICAL RULES:
   string) ? the handler will remove the entire paragraph cleanly. Keep
   ONLY the matching scenario, and swap project-specific values (unit
   count, GSF, etc.) into it.
+- AFFORDABILITY PARAGRAPHS ARE PROTECTED: Never delete paragraphs about
+  affordable units, affordability options, AMI levels, affordable rents,
+  or 421-a/485-x affordability percentages. Only update the specific
+  value if NEW RECORD DATA has a matching affordability field. If unsure,
+  leave the paragraph unchanged.
 - If pre-decided facts are provided (Building size, unit-section decision,
   ICAP term, Has commercial), use those facts exactly. Do not compute,
   second-guess, or hedge on those decisions.
@@ -595,6 +600,14 @@ function looksLikeStatutoryThreshold(text) {
   );
 }
 
+function looksLikeProtectedAffordabilityText(text) {
+  const s = String(text || '');
+  return (
+    /\b(affordable units?|affordability option|AMI|area median income|affordable rates?|affordable rents?|leased at affordable|Option\s+[ABC])\b/i.test(s) ||
+    /\b\d+%\s+of\s+the\s+units\b/i.test(s)
+  );
+}
+
 async function mapDocxSwaps(templateText, recordFields, schema, opts) {
   opts = opts || {};
   const data = sanitizeRecordFields(
@@ -673,6 +686,15 @@ async function mapDocxSwaps(templateText, recordFields, schema, opts) {
     s && typeof s.oldValue === 'string' && s.oldValue.length &&
     typeof s.newValue === 'string' && s.oldValue !== s.newValue
   );
+  swaps = swaps.filter((s) => {
+    const old = String(s.oldValue || '');
+    const next = String(s.newValue || '');
+    if (looksLikeProtectedAffordabilityText(old) && next.trim() === '') {
+      dlog(`[cfg-debug] dropped protected affordability deletion: ${JSON.stringify(old.slice(0, 120))}`);
+      return false;
+    }
+    return true;
+  });
   if (aiAnswer) {
     swaps = swaps.filter((s) => {
       const field = String(s.fieldName || '');
