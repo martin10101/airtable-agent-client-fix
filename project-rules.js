@@ -220,10 +220,13 @@ function deriveProjectFacts(fields, opts) {
   const units = parseNumber(getField(fields, 'Units'));
   const commercialGrossSqft = parseNumber(getField(fields, 'Commercial Gross SQFT'));
   const buildingType = asString(getField(fields, 'Building Type')).toLowerCase();
+  const hasCommercialSqft = commercialGrossSqft != null && commercialGrossSqft > 0;
+  const isMixedUse = /\bmixed(?:\s|-)?use\b/.test(buildingType) || buildingType.includes('mixed');
+  const isCommercialOnly = buildingType.includes('commercial') && !buildingType.includes('residential') && !isMixedUse;
   const hasCommercial =
-    (commercialGrossSqft != null && commercialGrossSqft > 0) ||
-    buildingType.includes('mixed') ||
-    buildingType.includes('commercial');
+    hasCommercialSqft ||
+    isMixedUse ||
+    (isCommercialOnly && units == null);
   const permitType = normalizePermitType(fields);
   const icap = resolveIcapTerm(fields, opts.icapBoundariesFile);
 
@@ -309,6 +312,15 @@ function aiAnswersText(fields) {
     .map((line) => line.replace(/^\s*\d+[\).:\-\s]+/, '').trim())
     .filter(Boolean);
   return lines.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeGeneratedLine(value) {
+  return String(value || '')
+    .replace(/^\s*\d+[\).:\-\s]+/, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[.。]\s*$/, '')
+    .trim()
+    .toLowerCase();
 }
 
 function permitWorkTerm(facts) {
@@ -474,6 +486,9 @@ function inspectGeneratedDocxText(text, fields, facts) {
   if (/commercial space\s+and\s+commercial space/i.test(body)) {
     warnings.push('Duplicate commercial language found: "commercial space and commercial space".');
   }
+  if (facts && !facts.hasCommercial && /(?:Property Summary:[^\r\n]*commercial space|\b\d[\d,]*\s+residential(?:\s+rental)?\s+units?\s+and\s+commercial space\b|featuring[^\r\n.]*commercial space)/i.test(body)) {
+    warnings.push('Commercial-space language remains even though Commercial Gross SQFT is blank/zero and the record is not mixed-use.');
+  }
   const commercialSqft = getFactsValue('Commercial Gross SQFT', fields, facts);
   if (!commercialSqft && /\band\s+[\d,]+(?:\.\d+)?\s+square feet of commercial space/i.test(body)) {
     warnings.push('Commercial square-foot value remains even though Airtable has no Commercial Gross SQFT value.');
@@ -514,7 +529,7 @@ function inspectGeneratedDocxText(text, fields, facts) {
     warnings.push('Over-10 modest rental workbook timing remains in a project with 10 or fewer units.');
   }
   const hasTransitionalSection = /Transitional Assessed Valuation|transition assessment system|phased-in transition assessment|multiple Class A residential units will be classified as Tax Class 2/i.test(body);
-  const hasCapSection = /Tax Class 2a,\s*2b and 2c CAP|Tax Class 2a|tax classes 2a,\s*2b,\s*and 2c|8% cap on annual assessment increases|30% within any five-year period/i.test(body);
+  const hasCapSection = /Tax Class 2a,\s*2b and 2c CAP|Tax Class 2a|tax classes 2a,\s*2b,\s*and 2c|8% cap on annual assessment increases|30% (?:within|over) any five-year period|prior limit on increases|cannot exceed 8%/i.test(body);
   if (facts && facts.units != null && facts.units > 10 && hasCapSection) {
     warnings.push('2A/2B/2C cap section remains in a project with more than 10 units.');
   }
@@ -533,6 +548,10 @@ function inspectGeneratedDocxText(text, fields, facts) {
   const projectedHeadingCount = (body.match(/Projected Assessed Value Increase and Phase-In/gi) || []).length;
   if (projectedHeadingCount > 1) {
     warnings.push('Duplicate Projected Assessed Value Increase and Phase-In heading remains.');
+  }
+  const aiAnswer = aiAnswersText(fields);
+  if (aiAnswer && /(?:^|\n)\s*(?:\d+[\).]\s*)?(?:The project involves|A new [^\r\n.]*building[^\r\n.]*will be constructed|The building will aggregate)/i.test(body.replace(aiAnswer, ''))) {
+    warnings.push('AI Answers is present, but an old Project details sentence still remains.');
   }
   const owner = asString(getField(fields, 'Owner'));
   if (owner && new RegExp(`Sincerely yours[\\s\\S]{0,120}${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,120}Metropolitan Realty`, 'i').test(body)) {
@@ -586,12 +605,15 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     swaps.push({ fieldName, oldValue, newValue });
     log(`[quality-fix] ${reason}: ${JSON.stringify(String(oldValue).slice(0, 120))} -> ${JSON.stringify(String(newValue).slice(0, 120))}`);
   };
-  const addMatchingParagraphs = (fieldName, regex, newValue, reason) => {
+  const addMatchingParagraphs = (fieldName, regex, newValue, reason, matchOpts) => {
+    matchOpts = matchOpts || {};
+    const skipNormalized = new Set((matchOpts.skipNormalized || []).filter(Boolean));
     const seen = new Set();
     for (const raw of body.split(/\r?\n/)) {
       const oldValue = raw.trim();
       const paragraph = oldValue.replace(/\s+/g, ' ').trim();
-      if (!oldValue || seen.has(oldValue) || !regex.test(paragraph)) continue;
+      regex.lastIndex = 0;
+      if (!oldValue || seen.has(oldValue) || skipNormalized.has(normalizeGeneratedLine(paragraph)) || !regex.test(paragraph)) continue;
       seen.add(oldValue);
       add(fieldName, oldValue, newValue, reason);
     }
@@ -613,6 +635,41 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     'commercial space',
     'Removed duplicate commercial language'
   );
+
+  if (facts && !facts.hasCommercial) {
+    const propertySummaryLine = body.match(/Property Summary:\s*[^\r\n]+/i);
+    if (propertySummaryLine && /commercial space/i.test(propertySummaryLine[0])) {
+      const cleaned = propertySummaryLine[0]
+        .replace(/\s+(?:and\s+)?commercial space\b/ig, '')
+        .replace(/\s+[-–]\s+/g, ' - ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      add('Commercial Cleanup', propertySummaryLine[0], cleaned, 'Removed commercial language from residential property summary');
+    }
+
+    const residentialCommercialRe = /\b\d[\d,]*\s+residential(?:\s+rental)?\s+units?\s+and\s+commercial space\b/gi;
+    let commercialMatch;
+    while ((commercialMatch = residentialCommercialRe.exec(body)) !== null) {
+      add(
+        'Commercial Cleanup',
+        commercialMatch[0],
+        commercialMatch[0].replace(/\s+and\s+commercial space\b/i, ''),
+        'Removed commercial language from residential unit phrase'
+      );
+    }
+
+    for (const raw of body.split(/\r?\n/)) {
+      const oldValue = raw.trim();
+      if (!/^(?:\d+[\).]\s*)?(?:A new|The project involves|The proposed|The building)[^\r\n.]*commercial space[^\r\n.]*\.?$/i.test(oldValue)) continue;
+      const cleaned = oldValue
+        .replace(/\s+and\s+commercial space\b/ig, '')
+        .replace(/,\s*commercial space\b/ig, '')
+        .replace(/\s+commercial space\b/ig, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      add('Commercial Cleanup', oldValue, cleaned, 'Removed commercial language from residential project-detail line');
+    }
+  }
 
   const commercialSqft = getFactsValue('Commercial Gross SQFT', fields, facts);
   if (!aiAnswer && !commercialSqft) {
@@ -656,6 +713,7 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   const newBuildingLineForAi = body.match(/A new [^\r\n.]*building[^\r\n.]*will be constructed[^\r\n.]*\./i);
   const renovationLineForAi = body.match(/The project involves[^\r\n.]*(?:alteration|conversion|renovation)[^\r\n.]*\./i);
   if (aiAnswer && (newBuildingLineForAi || renovationLineForAi)) {
+    const aiNormalized = normalizeGeneratedLine(aiAnswer);
     const keepLine = newBuildingLineForAi || renovationLineForAi;
     const removeLine = keepLine === newBuildingLineForAi ? renovationLineForAi : newBuildingLineForAi;
     add(
@@ -676,7 +734,39 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       'AI Answers Project Detail',
       /^(?:\d+[\).]\s*)?(?:The\s+)?(?:proposed\s+)?building\s+(?:will\s+)?(?:have|contain|contains|aggregate|consist)[^\r\n]*?(?:gross|square feet|residential area|residential space|commercial area|community facility|parking|bicycle)[^\r\n]*\.?$/i,
       '',
-      'Removed secondary project-detail/gross-area line because AI Answers supplies the combined detail'
+      'Removed secondary project-detail/gross-area line because AI Answers supplies the combined detail',
+      { skipNormalized: [aiNormalized] }
+    );
+    addMatchingParagraphs(
+      'AI Answers Project Detail',
+      /^(?:\d+[\).]\s*)?The project involves[^\r\n]*(?:alteration|conversion|renovation|existing building|residential rental units|commercial space)[^\r\n]*\.?$/i,
+      '',
+      'Removed stale project-involves line because AI Answers supplies the combined detail',
+      { skipNormalized: [aiNormalized] }
+    );
+    addMatchingParagraphs(
+      'AI Answers Project Detail',
+      /^(?:\d+[\).]\s*)?A new [^\r\n.]*building[^\r\n.]*will be constructed[^\r\n.]*\.?$/i,
+      '',
+      'Removed stale new-building line because AI Answers supplies the combined detail',
+      { skipNormalized: [aiNormalized] }
+    );
+  }
+  if (aiAnswer) {
+    const aiNormalized = normalizeGeneratedLine(aiAnswer);
+    addMatchingParagraphs(
+      'AI Answers Project Detail',
+      /^(?:\d+[\).]\s*)?The project involves[^\r\n]*(?:alteration|conversion|renovation|existing building|residential rental units|commercial space)[^\r\n]*\.?$/i,
+      '',
+      'Removed stale project-involves line because AI Answers supplies the combined detail',
+      { skipNormalized: [aiNormalized] }
+    );
+    addMatchingParagraphs(
+      'AI Answers Project Detail',
+      /^(?:\d+[\).]\s*)?A new [^\r\n.]*building[^\r\n.]*will be constructed[^\r\n.]*\.?$/i,
+      '',
+      'Removed stale new-building line because AI Answers supplies the combined detail',
+      { skipNormalized: [aiNormalized] }
     );
   }
 
@@ -766,11 +856,13 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   const aggregateGrossSqftSentence = body.match(/The building will aggregate\s+(?:[\d,.\s]*|\[[^\]]+\]\s*)gross square feet\.?/i);
   const hasAggregateGrossSqftSentence = /\baggregate\s+(?:[\d,.\s]*|\[[^\]]+\]\s*)gross square feet\b/i.test(body);
   if (aiAnswer) {
+    const aiNormalized = normalizeGeneratedLine(aiAnswer);
     addMatchingParagraphs(
       'AI Answers Project Detail',
       /^(?:\d+[\).]\s*)?(?:(?:The|This)\s+)?(?:proposed\s+)?building[^\r\n.]{0,120}\b(?:aggregate|aggregates|have|has|contain|contains|consist|consists)[^\r\n.]*\b(?:gross\s+(?:square\s+feet|floor\s+area)|square feet|residential\s+(?:gross\s+)?(?:area|space|square feet)|commercial\s+(?:gross\s+)?(?:area|space|square feet)|community facility|parking|bicycle)[^\r\n.]*\.?$/i,
       '',
-      'Removed separate gross-square-foot project-detail line because AI Answers supplies it'
+      'Removed separate gross-square-foot project-detail line because AI Answers supplies it',
+      { skipNormalized: [aiNormalized] }
     );
   } else if (hasAggregateGrossSqftSentence) {
     if (grossSqftText) {
@@ -957,7 +1049,7 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
     );
     addMatchingParagraphs(
       'Valuation Section Cleanup',
-      /tax classes 2a,\s*2b,\s*and 2c|tax class 2a,\s*2b,\s*and 2c|8% cap on annual assessment increases|30% within any five-year period|assessment cap does not apply/i,
+      /tax classes 2a,\s*2b,\s*and 2c|tax class 2a,\s*2b,\s*and 2c|8%\s*(?:cap|annual|annually)|30%\s*(?:within|over)\s+any\s+five-year\s+period|prior limit on increases|cannot exceed 8%|assessment cap does not apply/i,
       '',
       'Removed 2A/2B/2C cap paragraph for project with more than 10 units'
     );

@@ -32,7 +32,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-16-word-repair-filename-v18';
+const APP_VERSION = '2026-06-22-project-consistency-v19';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
