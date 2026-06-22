@@ -628,6 +628,43 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       add(fieldName, match[0], newValue, reason);
     }
   };
+  const lines = body.split(/\r?\n/).map((raw) => ({
+    raw,
+    text: raw.trim().replace(/\s+/g, ' ')
+  }));
+  const findLine = (regex, start) => {
+    for (let i = start || 0; i < lines.length; i++) {
+      regex.lastIndex = 0;
+      if (regex.test(lines[i].text)) return i;
+    }
+    return -1;
+  };
+  const addLineRange = (fieldName, start, endExclusive, reason, opts) => {
+    opts = opts || {};
+    const keepRegex = opts.keepRegex || null;
+    for (let i = start; i >= 0 && i < endExclusive && i < lines.length; i++) {
+      const oldValue = lines[i].text;
+      if (!oldValue) continue;
+      if (keepRegex) {
+        keepRegex.lastIndex = 0;
+        if (keepRegex.test(oldValue)) continue;
+      }
+      add(fieldName, oldValue, '', reason);
+    }
+  };
+  const nextValuationBoundary = (start) => {
+    for (let i = start + 1; i < lines.length; i++) {
+      const text = lines[i].text;
+      if (!text) continue;
+      if (/^(?:Post-Completion|Tax liability|Disclaimer|Eligibility Options|485-x Benefit Eligibility|Proposed Real Estate Tax Liabilities|Sincerely yours)/i.test(text)) {
+        return i;
+      }
+      if (/^(?:Transitional Assessed Valuation|Tax Class\s*2a,\s*2b\s*and\s*2c\s*CAP|Projected Assessed Value Increase and Phase-In)$/i.test(text)) {
+        return i;
+      }
+    }
+    return lines.length;
+  };
 
   add(
     'Quality Fix',
@@ -778,6 +815,20 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
       workTerm,
       'Collapsed combined new-construction/renovation wording to the permit-specific term'
     );
+    if (facts && facts.keepPermitScenario === 'new-building') {
+      addMatchingText(
+        'Permit Type Cleanup',
+        /\bdue to the renovation\b/gi,
+        'due to the new construction',
+        'Changed phase-in wording to new construction for NB/new-building permit'
+      );
+      addMatchingText(
+        'Permit Type Cleanup',
+        /\bresult of the renovation\b/gi,
+        'result of the new construction',
+        'Changed phase-in wording to new construction for NB/new-building permit'
+      );
+    }
   }
 
   const desiredProjectDetail = aiAnswer ? '' : projectDetailSentence(fields, facts);
@@ -1041,31 +1092,34 @@ function buildPostGenerationCleanupSwaps(text, fields, facts, opts) {
   }
 
   if (facts && facts.units != null && facts.units > 10) {
-    addMatchingParagraphs(
-      'Valuation Section Cleanup',
-      /^(?:Tax Class\s*)?2a,\s*2b\s*and\s*2c\s*CAP$|^Tax Class 2a,\s*2b\s*and\s*2c\s*CAP$/i,
-      '',
-      'Removed 2A/2B/2C cap heading for project with more than 10 units'
-    );
-    addMatchingParagraphs(
-      'Valuation Section Cleanup',
-      /tax classes 2a,\s*2b,\s*and 2c|tax class 2a,\s*2b,\s*and 2c|8%\s*(?:cap|annual|annually)|30%\s*(?:within|over)\s+any\s+five-year\s+period|prior limit on increases|cannot exceed 8%|assessment cap does not apply/i,
-      '',
-      'Removed 2A/2B/2C cap paragraph for project with more than 10 units'
-    );
+    const capStart = findLine(/^(?:Tax Class\s*)?2a,\s*2b\s*and\s*2c\s*CAP$/i);
+    if (capStart !== -1) {
+      addLineRange(
+        'Valuation Section Cleanup',
+        capStart,
+        nextValuationBoundary(capStart),
+        'Removed 2A/2B/2C cap section for project with more than 10 units'
+      );
+    } else {
+      for (const line of lines) {
+        const text = line.text;
+        if (!text) continue;
+        if (!/tax classes 2a,\s*2b,\s*and 2c|tax class 2a,\s*2b,\s*and 2c|8%\s*(?:cap|annual|annually)|30%\s*(?:within|over)\s+any\s+five-year\s+period|prior limit on increases|cannot exceed 8%|assessment cap does not apply/i.test(text)) continue;
+        if (/transition assessment system|phased-in transition assessment|multiple Class A residential units will be classified as Tax Class 2/i.test(text)) continue;
+        add('Valuation Section Cleanup', text, '', 'Removed standalone 2A/2B/2C cap paragraph for project with more than 10 units');
+      }
+    }
   } else if (facts && facts.units != null && facts.units <= 10) {
-    addMatchingParagraphs(
-      'Valuation Section Cleanup',
-      /^Transitional Assessed Valuation$/i,
-      '',
-      'Removed transitional assessed valuation heading for project with 10 or fewer units'
-    );
-    addMatchingParagraphs(
-      'Valuation Section Cleanup',
-      /multiple Class A residential units will be classified as Tax Class 2|transition assessment system|phased-in transition assessment|substantial increase in value.*future years.*phased-in transition/i,
-      '',
-      'Removed transitional assessed valuation paragraph for project with 10 or fewer units'
-    );
+    const transitionalStart = findLine(/^Transitional Assessed Valuation$/i);
+    const capStart = findLine(/^(?:Tax Class\s*)?2a,\s*2b\s*and\s*2c\s*CAP$/i, transitionalStart === -1 ? 0 : transitionalStart + 1);
+    if (transitionalStart !== -1 && capStart !== -1 && transitionalStart < capStart) {
+      addLineRange(
+        'Valuation Section Cleanup',
+        transitionalStart,
+        capStart,
+        'Removed transitional assessed valuation section for project with 10 or fewer units'
+      );
+    }
   }
 
   if (facts && facts.units != null && facts.units < 100) {
