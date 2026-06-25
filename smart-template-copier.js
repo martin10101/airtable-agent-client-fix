@@ -129,6 +129,33 @@ function valuationPlaceholderParagraphs(range) {
   return rendered.join('');
 }
 
+function projectDetailSlotForText(text) {
+  const clean = String(text || '').trim();
+  if (/^A new multiple dwelling/i.test(clean)) return '{{Project_Details_New_Residential_Line}}';
+  if (/^A new mixed-use/i.test(clean) || /^The proposed is to construct a new mixed-use/i.test(clean)) {
+    return '{{Project_Details_New_Mixed_Use_Line}}';
+  }
+  if (/^The project involves the proposed/i.test(clean)) return '{{Project_Details_Renovation_Line}}';
+  if (/^The building (will aggregate|will cover|will include|will have a total)/i.test(clean)) {
+    return '{{Gross_Square_Feet_Line}}';
+  }
+  return null;
+}
+
+function projectDetailPlaceholderParagraphs(range, opts) {
+  opts = opts || {};
+  const rendered = [];
+  const used = new Set();
+  if (opts.includeAi !== false && range[0]) rendered.push(paragraphLike(range[0].xml, '{{Project_Details_AI_Line}}'));
+  for (const p of range) {
+    const slot = projectDetailSlotForText(p.text);
+    if (!slot || used.has(slot)) continue;
+    used.add(slot);
+    rendered.push(paragraphLike(p.xml, slot));
+  }
+  return rendered.join('');
+}
+
 function shouldSmartCopy(filePath) {
   const base = path.basename(filePath);
   if (!/\.docx$/i.test(base)) return false;
@@ -204,12 +231,10 @@ function rewriteDocumentXml(xml) {
     }
 
     if (insideProjectDetails && isProjectFactLine(text)) {
-      if (!projectBlockInserted) {
-        out += paragraphLike(p.xml, '{{Project_Details_Block}}');
-        projectBlockInserted = true;
-      }
       let next = i + 1;
       while (next < paragraphs.length && isProjectFactLine(paragraphs[next].text)) next++;
+      out += projectDetailPlaceholderParagraphs(paragraphs.slice(i, next), { includeAi: !projectBlockInserted });
+      projectBlockInserted = true;
       cursor = paragraphs[next] ? paragraphs[next].start : p.end;
       i = next;
       changed = true;

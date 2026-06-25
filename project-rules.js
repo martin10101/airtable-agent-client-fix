@@ -329,6 +329,25 @@ function permitWorkTerm(facts) {
   return '';
 }
 
+function residentialUnitPhrase(fields, facts, noun) {
+  const units = facts && facts.units != null ? facts.units : parseNumber(getField(fields, 'Units'));
+  if (units == null) return '';
+  const condoRental = asString(getField(fields, 'Condo/Rental')).toLowerCase();
+  const isCondo = condoRental.includes('condo') && !condoRental.includes('rental');
+  if (noun) return `${formatNumber(units)} ${noun}`;
+  return isCondo ? `${formatNumber(units)} residential condominium units` : `${formatNumber(units)} residential rental units`;
+}
+
+function grossSqftTotalDescription(fields) {
+  const residential = parseNumber(getField(fields, 'Residential Gross SQFT'));
+  const commercial = parseNumber(getField(fields, 'Commercial Gross SQFT'));
+  const fallback = parseNumber(getField(fields, 'Gross SQFT') || getField(fields, 'Total GSF') || getField(fields, 'GSF'));
+  let total = null;
+  if (residential != null || commercial != null) total = (residential || 0) + (commercial || 0);
+  else total = fallback;
+  return total != null ? `${formatNumber(total)} gross square feet` : '';
+}
+
 function getFactsValue(token, fields, facts) {
   const key = normalizeToken(token);
   const aiAnswer = aiAnswersText(fields);
@@ -441,15 +460,15 @@ function buildSmartTaxValuationParts(fields, facts, warnings) {
     return {
       heading: 'Transitional Assessed Valuation',
       primaryParagraph: "Under the DOF's rules and regulations, multiple Class A residential units will be classified as Tax Class 2.",
-      rptlParagraph: 'The New York Real Property Tax Law ("RPTL"), Section 1805, establishes a transition assessment system in the City of New York. Under this system, the usual increase in a property’s actual assessed value from one year to the next is phased in over five years in equal installments. The five-year phase-in does not apply to increases attributable to new construction or other physical improvements to the property. Increases attributable to such physical improvements or new construction are added in full to the following year’s assessment. Pursuant to RPTL Section 1805, the taxable assessment is the lesser of the actual assessed valuation and the transition assessed valuation.',
+      rptlParagraph: 'The New York Real Property Tax Law (“RPTL”), Section 1805, establishes a transition assessment system in the City of New York. Under this system, the usual increase in a property’s actual assessed value from one year to the next is phased in over five years in equal installments. The five-year phase-in does not apply to increases attributable to new construction or other physical improvements to the property. Increases attributable to such physical improvements or new construction are added in full to the following year’s assessment. Pursuant to RPTL Section 1805, the taxable assessment is the lesser of the actual assessed valuation and the transition assessed valuation.',
       phaseHeading: 'Projected Assessed Value Increase and Phase-In',
-      phaseParagraph: `We believe there will be a substantial increase in market value for tax years 2027/28 and/or 2028/29 due to the ${phaseWorkTerm}, and that the resulting increase in assessed value will be reflected immediately on the assessment roll. However, in future years, increases in assessed value will likely result in the taxable assessment being based on a phased-in transition assessment.`
+      phaseParagraph: `We believe there will be a substantial increase in value for tax years 2027/28 and/or 2028/29 as a result of the ${phaseWorkTerm}, and that this increase will be placed on the assessment roll immediately. However, in future years, increases in assessed value will likely result in the taxable assessment being based on a phased-in transition assessment.`
     };
   }
 
   return {
     heading: 'Tax Class 2a, 2b and 2c CAP',
-    primaryParagraph: 'Under New York Real Property Tax Law Section 1805, properties in tax classes 2a, 2b, and 2c are subject to an 8% cap on annual assessment increases. Specifically, the law provides that an assessor of any special assessing unit "shall not increase the assessed value of any tax class 2a, 2b, and 2c properties" in a single year by more than 8% of the previous year’s assessed value, as listed on the assessment roll. Additionally, the assessor cannot increase the assessed value of these properties by more than 30% within any five-year period. The assessment cap does not apply to increases resulting from physical changes or the expiration of any tax exemptions or abatements.'
+    primaryParagraph: 'Under New York Real Property Tax Law Section 1805, properties in tax classes 2a, 2b, and 2c are subject to an 8% cap on annual assessment increases. Specifically, the law provides that an assessor of any special assessing unit “shall not increase the assessed value of any tax class 2a, 2b, and 2c properties” in a single year by more than 8% of the previous year’s assessed value, as listed on the assessment roll. Additionally, the assessor cannot increase the assessed value of these properties by more than 30% within any five-year period. The assessment cap does not apply to increases resulting from physical changes or the expiration of any tax exemptions or abatements.'
   };
 }
 
@@ -463,20 +482,68 @@ function taxValuationBlockFromParts(parts) {
   ].filter(Boolean).join('\n');
 }
 
-function buildProjectDetailsBlock(fields, facts, warnings) {
+function buildProjectDetailsTemplateLines(fields, facts, warnings) {
   const aiAnswer = aiAnswersText(fields);
-  if (aiAnswer) return aiAnswer;
+  if (aiAnswer) {
+    return {
+      aiLine: aiAnswer,
+      newResidentialLine: '',
+      newMixedUseLine: '',
+      renovationLine: '',
+      grossLine: ''
+    };
+  }
 
   const permit = facts && facts.permitType ? facts.permitType : normalizePermitType(fields);
   if (!permit || !permit.kind) {
-    warnings.push('Permit Type is missing or unclear; Project_Details_Block was left blank instead of guessing new construction vs renovation.');
-    return '';
+    warnings.push('Permit Type is missing or unclear; project detail lines were left blank instead of guessing new construction vs renovation.');
+    return {};
   }
 
-  const lines = [projectDetailSentence(fields, facts)];
-  const gross = grossSqftDescription(fields);
-  if (gross) lines.push(`The building will aggregate ${gross}.`);
-  return lines.filter(Boolean).join('\n');
+  const summary = projectSummary(fields, facts);
+  const gross = grossSqftTotalDescription(fields);
+  const lines = {
+    aiLine: '',
+    newResidentialLine: '',
+    newMixedUseLine: '',
+    renovationLine: '',
+    grossLine: gross ? `The building will aggregate ${gross}.` : ''
+  };
+
+  if (facts && facts.keepPermitScenario === 'new-building') {
+    if (facts.hasCommercial) {
+      const apartmentPhrase = residentialUnitPhrase(fields, facts, 'rental apartments');
+      const featurePhrase = apartmentPhrase ? `${apartmentPhrase} and commercial space` : summary;
+      lines.newMixedUseLine = featurePhrase ? `A new mixed-use building will be built, featuring ${featurePhrase}.` : 'A new mixed-use building will be built.';
+    } else {
+      const unitPhrase = residentialUnitPhrase(fields, facts);
+      lines.newResidentialLine = unitPhrase
+        ? `A new multiple dwelling building will be constructed with ${unitPhrase}.`
+        : 'A new multiple dwelling building will be constructed.';
+    }
+    return lines;
+  }
+
+  if (facts && facts.keepPermitScenario === 'alteration-conversion') {
+    warnings.push('AI Answers is recommended for renovation project details to preserve the client-specific alteration/enlargement wording exactly.');
+    lines.renovationLine = summary
+      ? `The project involves the proposed renovation and conversion of an existing building into ${summary}.`
+      : 'The project involves the proposed renovation and conversion of an existing building.';
+    return lines;
+  }
+
+  return lines;
+}
+
+function buildProjectDetailsBlock(fields, facts, warnings) {
+  const lines = buildProjectDetailsTemplateLines(fields, facts, warnings);
+  return [
+    lines.aiLine,
+    lines.newResidentialLine,
+    lines.newMixedUseLine,
+    lines.renovationLine,
+    lines.grossLine
+  ].filter(Boolean).join('\n');
 }
 
 function buildSmartDocxTags(fields, facts, opts) {
@@ -495,6 +562,7 @@ function buildSmartDocxTags(fields, facts, opts) {
   const lot = normalizeBlock(getField(fields, 'Lot'));
   const address = asString(getField(fields, 'Property Address') || getField(fields, 'Project Address') || getField(fields, 'Address'));
   const taxParts = buildSmartTaxValuationParts(fields, facts, warnings);
+  const projectLines = buildProjectDetailsTemplateLines(fields, facts, warnings);
   if (!workTerm) warnings.push('Permit Type is missing or unclear; Construction_Type was left blank.');
 
   add('Property_Address', address);
@@ -509,8 +577,19 @@ function buildSmartDocxTags(fields, facts, opts) {
   add('Property_Summary', summary);
   add('Project_Summary', summary);
   add('Building_Configuration', summary);
-  add('Project_Details_Block', buildProjectDetailsBlock(fields, facts, warnings));
+  add('Project_Details_Block', [
+    projectLines.aiLine,
+    projectLines.newResidentialLine,
+    projectLines.newMixedUseLine,
+    projectLines.renovationLine,
+    projectLines.grossLine
+  ].filter(Boolean).join('\n'));
   add('Project_Details_Statement', aiAnswersText(fields) || (workTerm ? projectDetailSentence(fields, facts) : ''));
+  add('Project_Details_AI_Line', projectLines.aiLine || '');
+  add('Project_Details_New_Residential_Line', projectLines.newResidentialLine || '');
+  add('Project_Details_New_Mixed_Use_Line', projectLines.newMixedUseLine || '');
+  add('Project_Details_Renovation_Line', projectLines.renovationLine || '');
+  add('Gross_Square_Feet_Line', projectLines.grossLine || '');
   add('Construction_Type', workTerm);
   add('Construction_Action', workTerm);
   add('Gross_Square_Feet_Description', gross);
