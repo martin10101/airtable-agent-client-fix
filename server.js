@@ -27,12 +27,14 @@ const express = require('express');
 const airtable = require('./airtable');
 const agent = require('./agent');
 const docxHandler = require('./docx-handler');
+const smartDocx = require('./smart-docx');
+const smartTemplateCopier = require('./smart-template-copier');
 const xlsxHandler = require('./xlsx-handler');
 const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-22-valuation-section-v20';
+const APP_VERSION = '2026-06-25-smart-docx-v21';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -174,6 +176,16 @@ function isWritable(filePath) {
   } finally {
     if (fd != null) { try { fs.closeSync(fd); } catch (_) {} }
   }
+}
+
+function ensureSmartTemplates(reason) {
+  if (!templatesCheck.ok) return { created: [], skipped: [], warnings: [templatesCheck.reason] };
+  const result = smartTemplateCopier.ensureSmartTemplateCopies(TEMPLATES_DIR, { log });
+  if (result.created.length || result.warnings.length) {
+    log(`[smart-template] ${reason}: created ${result.created.length}, skipped ${result.skipped.length}, warnings ${result.warnings.length}`);
+    if (result.warnings.length) log('[smart-template] warnings:', result.warnings);
+  }
+  return result;
 }
 
 // Open a file with its default Windows app — Word for .docx, Excel for .xlsx,
@@ -352,6 +364,7 @@ app.get('/setup', async (_req, res) => {
 app.get('/sync-templates', async (_req, res) => {
   try {
     if (!AIRTABLE_TABLE_NAME) throw new Error('AIRTABLE_TABLE_NAME not set in .env');
+    ensureSmartTemplates('/sync-templates');
     const _allFiles = walkTemplates(TEMPLATES_DIR).filter(f => {
       const base = f.split('/').pop();
       if (base.startsWith('~$')) return false;
@@ -661,82 +674,130 @@ app.post('/generate', async (req, res) => {
     let swapSummary = null;
     let docxValidation = null;
     let wordRepair = null;
+    let renderMode = ext === '.docx' ? 'legacy' : null;
+    let filledTags = [];
+    let missingTags = [];
+    let templateWarnings = [];
+    let validationWarnings = [];
     if (ext === '.docx') {
       const docxContext = docxHandler.extractDocxContext(templatePath);
       const templateText = docxContext.text;
       const projectFacts = projectRules.deriveProjectFacts(fields, {
         icapBoundariesFile: ICAP_BOUNDARIES_FILE
       });
-      log(`Template text length: ${templateText.length} chars; marked yellow/red targets: ${docxContext.markedTargets.length}. Fetching table schema...`);
+      const strictTemplate = smartDocx.containsSmartTags(templatePath);
+      renderMode = strictTemplate ? 'strict' : 'legacy';
+      log(`Template text length: ${templateText.length} chars; marked yellow/red targets: ${docxContext.markedTargets.length}; render mode: ${renderMode}.`);
       log('Project rule facts:', projectFacts);
       if (projectFacts.icap && projectFacts.icap.isIcap && !projectFacts.icap.checked) {
         log('[WARN] ICAP term was not resolved:', projectFacts.icap.reason);
       }
-      const deterministicSwaps = projectRules.buildTemplatePlaceholderSwaps(templateText, fields, projectFacts, { log });
-      if (deterministicSwaps.length) {
-        log(`Template placeholders produced ${deterministicSwaps.length} deterministic swaps`);
-      }
-      const schema = await airtable.getTableSchema(AIRTABLE_TABLE_NAME);
-      log(`Schema has ${schema.length} fields. Calling Claude (swap mode)...`);
-      const aiSwaps = await agent.mapDocxSwaps(templateText, fields, schema, {
-        templateFieldName: TEMPLATE_FIELD,
-        outputFieldName: OUTPUT_FIELD,
-        templateSelectFieldName: TEMPLATE_SELECT_FIELD,
-        projectFacts,
-        markedTargets: docxContext.markedTargets,
-        log
-      });
-      const seenSwaps = new Set();
-      const swaps = [];
-      for (const swap of deterministicSwaps.concat(aiSwaps)) {
-        const key = String(swap.oldValue || '');
-        if (!key || seenSwaps.has(key)) continue;
-        seenSwaps.add(key);
-        swaps.push(swap);
-      }
-      log(`Claude returned ${aiSwaps.length} swaps; total after deterministic template rules: ${swaps.length}`);
-      const CFG_LABELS = ['Building Configuration', 'Project Details', 'Proposed Construction', 'Building Description', 'Project Description'];
-      const cfgSwaps = swaps.filter((s) => CFG_LABELS.includes(s.fieldName));
-      if (cfgSwaps.length) {
-        log(`Building-config rewrites (${cfgSwaps.length}):`);
-        for (const s of cfgSwaps) {
-          log(`  ${s.fieldName}: "${String(s.oldValue || '').slice(0, 100)}" -> "${String(s.newValue || '').slice(0, 100)}"`);
+
+      if (strictTemplate) {
+        log('Strict smart DOCX mode: filling {{...}} tags only. Claude and legacy cleanup are skipped.');
+        const tagBuild = projectRules.buildSmartDocxTags(fields, projectFacts, { log });
+        validationWarnings = tagBuild.warnings || [];
+        templateWarnings = smartDocx.inspectSmartTemplateText(templateText);
+        if (templateWarnings.length) log('[WARN] Smart template warnings:', templateWarnings);
+        if (validationWarnings.length) log('[WARN] Smart value warnings:', validationWarnings);
+
+        const strictResult = smartDocx.renderSmartDocx(templatePath, tagBuild.values, outputPath, { log });
+        filledTags = strictResult.filledTags;
+        missingTags = strictResult.missingTags;
+        if (missingTags.length) {
+          validationWarnings = validationWarnings.concat(`Unresolved smart tags remain: ${missingTags.join(', ')}`);
+          log('[WARN] Missing smart tags:', missingTags);
         }
+
+        docxValidation = docxHandler.validateDocx(outputPath);
+        if (docxValidation.ok) {
+          log(`[docx-check] OK: ${docxValidation.checkedParts} XML part(s) checked; no invalid XML or paragraph-property order issue found.`);
+        } else {
+          validationWarnings = validationWarnings.concat(docxValidation.problems || []);
+          log(`[WARN] DOCX validation found ${docxValidation.problems.length} issue(s) in ${path.basename(outputPath)}:`, docxValidation.problems);
+        }
+        swapSummary = {
+          renderMode,
+          filledTags,
+          missingTags,
+          templateWarnings,
+          validationWarnings,
+          docxValidation
+        };
       } else {
-        log('No building-config rewrites produced (neither AI configuration_claims nor labeled-line backstop fired).');
+        const deterministicSwaps = projectRules.buildTemplatePlaceholderSwaps(templateText, fields, projectFacts, { log });
+        if (deterministicSwaps.length) {
+          log(`Template placeholders produced ${deterministicSwaps.length} deterministic swaps`);
+        }
+        const schema = await airtable.getTableSchema(AIRTABLE_TABLE_NAME);
+        log(`Schema has ${schema.length} fields. Calling Claude (swap mode)...`);
+        const aiSwaps = await agent.mapDocxSwaps(templateText, fields, schema, {
+          templateFieldName: TEMPLATE_FIELD,
+          outputFieldName: OUTPUT_FIELD,
+          templateSelectFieldName: TEMPLATE_SELECT_FIELD,
+          projectFacts,
+          markedTargets: docxContext.markedTargets,
+          log
+        });
+        const seenSwaps = new Set();
+        const swaps = [];
+        for (const swap of deterministicSwaps.concat(aiSwaps)) {
+          const key = String(swap.oldValue || '');
+          if (!key || seenSwaps.has(key)) continue;
+          seenSwaps.add(key);
+          swaps.push(swap);
+        }
+        log(`Claude returned ${aiSwaps.length} swaps; total after deterministic template rules: ${swaps.length}`);
+        const CFG_LABELS = ['Building Configuration', 'Project Details', 'Proposed Construction', 'Building Description', 'Project Description'];
+        const cfgSwaps = swaps.filter((s) => CFG_LABELS.includes(s.fieldName));
+        if (cfgSwaps.length) {
+          log(`Building-config rewrites (${cfgSwaps.length}):`);
+          for (const s of cfgSwaps) {
+            log(`  ${s.fieldName}: "${String(s.oldValue || '').slice(0, 100)}" -> "${String(s.newValue || '').slice(0, 100)}"`);
+          }
+        } else {
+          log('No building-config rewrites produced (neither AI configuration_claims nor labeled-line backstop fired).');
+        }
+        const result = docxHandler.fillDocxSwaps(templatePath, swaps, outputPath, {
+          markerEvaluator: (paragraphText) => projectRules.evaluateTemplateMarkerText(paragraphText, fields, projectFacts),
+          log
+        });
+        log(`Applied ${result.applied.length} swaps; ${result.missed.length} old values not found in doc`);
+        if (result.missed.length) {
+          log('Missed swaps (old value not located in doc):', result.missed.map((s) => s.oldValue));
+        }
+        let outputText = docxHandler.extractDocxText(outputPath);
+        const cleanupPasses = [];
+        for (let pass = 1; pass <= 3; pass++) {
+          const cleanupSwaps = projectRules.buildPostGenerationCleanupSwaps(outputText, fields, projectFacts, { log });
+          if (!cleanupSwaps.length) break;
+          log(`Applying ${cleanupSwaps.length} post-generation cleanup swap(s), pass ${pass}`);
+          const cleanupResult = docxHandler.fillDocxSwaps(outputPath, cleanupSwaps, outputPath, { log });
+          log(`Cleanup pass ${pass} applied ${cleanupResult.applied.length}; missed ${cleanupResult.missed.length}`);
+          cleanupPasses.push({ pass, ...cleanupResult });
+          outputText = docxHandler.extractDocxText(outputPath);
+          if (!cleanupResult.applied.length) break;
+        }
+        const cleanupResult = cleanupPasses.length ? cleanupPasses : null;
+        const qualityWarnings = projectRules.inspectGeneratedDocxText(outputText, fields, projectFacts);
+        if (qualityWarnings.length) {
+          log('[WARN] Output quality warnings:', qualityWarnings);
+        }
+        docxValidation = docxHandler.validateDocx(outputPath);
+        if (docxValidation.ok) {
+          log(`[docx-check] OK: ${docxValidation.checkedParts} XML part(s) checked; no invalid XML or paragraph-property order issue found.`);
+        } else {
+          log(`[WARN] DOCX validation found ${docxValidation.problems.length} issue(s) in ${path.basename(outputPath)}:`, docxValidation.problems);
+        }
+        swapSummary = {
+          renderMode,
+          applied: result.applied,
+          missed: result.missed,
+          cleanup: cleanupResult,
+          qualityWarnings,
+          docxValidation
+        };
       }
-      const result = docxHandler.fillDocxSwaps(templatePath, swaps, outputPath, {
-        markerEvaluator: (paragraphText) => projectRules.evaluateTemplateMarkerText(paragraphText, fields, projectFacts),
-        log
-      });
-      log(`Applied ${result.applied.length} swaps; ${result.missed.length} old values not found in doc`);
-      if (result.missed.length) {
-        log('Missed swaps (old value not located in doc):', result.missed.map((s) => s.oldValue));
-      }
-      let outputText = docxHandler.extractDocxText(outputPath);
-      const cleanupPasses = [];
-      for (let pass = 1; pass <= 3; pass++) {
-        const cleanupSwaps = projectRules.buildPostGenerationCleanupSwaps(outputText, fields, projectFacts, { log });
-        if (!cleanupSwaps.length) break;
-        log(`Applying ${cleanupSwaps.length} post-generation cleanup swap(s), pass ${pass}`);
-        const cleanupResult = docxHandler.fillDocxSwaps(outputPath, cleanupSwaps, outputPath, { log });
-        log(`Cleanup pass ${pass} applied ${cleanupResult.applied.length}; missed ${cleanupResult.missed.length}`);
-        cleanupPasses.push({ pass, ...cleanupResult });
-        outputText = docxHandler.extractDocxText(outputPath);
-        if (!cleanupResult.applied.length) break;
-      }
-      const cleanupResult = cleanupPasses.length ? cleanupPasses : null;
-      const qualityWarnings = projectRules.inspectGeneratedDocxText(outputText, fields, projectFacts);
-      if (qualityWarnings.length) {
-        log('[WARN] Output quality warnings:', qualityWarnings);
-      }
-      docxValidation = docxHandler.validateDocx(outputPath);
-      if (docxValidation.ok) {
-        log(`[docx-check] OK: ${docxValidation.checkedParts} XML part(s) checked; no invalid XML or paragraph-property order issue found.`);
-      } else {
-        log(`[WARN] DOCX validation found ${docxValidation.problems.length} issue(s) in ${path.basename(outputPath)}:`, docxValidation.problems);
-      }
-      swapSummary = { applied: result.applied, missed: result.missed, cleanup: cleanupResult, qualityWarnings, docxValidation };
     } else if (ext === '.xlsx') {
       const workbookJson = await xlsxHandler.extractXlsxContent(templatePath);
       log(`Workbook JSON length: ${workbookJson.length} chars. Fetching table schema...`);
@@ -775,7 +836,13 @@ app.post('/generate', async (req, res) => {
 
     log('Written to:', outputPath);
     if (ext === '.docx') {
-      wordRepair = repairDocxWithWord(outputPath, log);
+      const shouldRunWordRepair = renderMode !== 'strict' || !docxValidation || !docxValidation.ok;
+      if (shouldRunWordRepair) {
+        wordRepair = repairDocxWithWord(outputPath, log);
+      } else {
+        wordRepair = { skipped: true, reason: 'strict DOCX passed validation' };
+        log('[docx-check] Skipping Word repair because strict DOCX passed validation.');
+      }
       if (wordRepair && wordRepair.ok) {
         const afterWordRepairCheck = docxHandler.validateDocx(outputPath);
         if (afterWordRepairCheck.ok) {
@@ -810,6 +877,11 @@ app.post('/generate', async (req, res) => {
       openFolderUrl: `http://localhost:${PORT}/open-output/${encodeURIComponent(path.basename(outputPath))}`,
       uploadedToAirtable,
       uploadError,
+      renderMode,
+      filledTags,
+      missingTags,
+      templateWarnings,
+      validationWarnings,
       swaps: swapSummary,
       docxValidation,
       wordRepair,
@@ -824,6 +896,7 @@ app.post('/generate', async (req, res) => {
 require('./pick-and-run')(app, { airtable, log, TEMPLATES_DIR, TEMPLATE_SELECT_FIELD, PORT });
 
 app.listen(PORT, () => {
+  ensureSmartTemplates('startup');
   console.log('');
   console.log('  Airtable Document Agent');
   console.log('  ------------------------');
