@@ -336,5 +336,6 @@ function ensureSmartTemplateCopies(rootDir, opts) {
 module.exports = {
   createSmartTemplateCopy,
   ensureSmartTemplateCopies,
-  rewriteDocumentXml
+  rewriteDocumentXml,
+  shouldSmartCopy
 };

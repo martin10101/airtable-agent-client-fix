@@ -34,7 +34,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-25-template-language-v24';
+const APP_VERSION = '2026-06-25-auto-smart-regular-template-v25';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -156,6 +156,18 @@ function walkTemplates(dir, base) {
   return results.sort((a, b) => a.localeCompare(b));
 }
 
+function isVisibleTemplateChoice(relPath) {
+  const parts = String(relPath || '').replace(/\\/g, '/').split('/');
+  if (parts.some((part) => /^SMART$/i.test(part))) return false;
+  const base = parts.pop() || '';
+  if (base.startsWith('~$')) return false;
+  if (/[%,&()\[\]{}$;"'`]/.test(base)) return false;
+  if (/[\r\n\t]/.test(relPath)) return false;
+  if (String(relPath || '').length > 90) return false;
+  if (/\.pdf$/i.test(base)) return false;
+  return true;
+}
+
 function openInExplorer(targetPath, selectMode) {
   const args = selectMode ? ['/select,', targetPath] : [targetPath];
   const child = spawn('explorer.exe', args, { detached: true, stdio: 'ignore' });
@@ -186,6 +198,63 @@ function ensureSmartTemplates(reason) {
     if (result.warnings.length) log('[smart-template] warnings:', result.warnings);
   }
   return result;
+}
+
+function hiddenSmartTemplatePath(sourcePath) {
+  const stat = fs.statSync(sourcePath);
+  let label = path.basename(sourcePath);
+  try {
+    const rel = path.relative(TEMPLATES_DIR, sourcePath);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) label = rel;
+  } catch (_) {}
+  const versionDir = safeFilename(APP_VERSION) || 'current';
+  const smartDir = path.join(WORK_DIR, 'auto-smart', versionDir);
+  const safeLabel = safeFilename(label.replace(/[\\/]/g, '__')) || 'template';
+  return path.join(smartDir, `${safeLabel}-${stat.size}-${Math.floor(stat.mtimeMs)}.docx`);
+}
+
+function prepareDocxRenderTemplate(selectedPath, selectedName) {
+  if (smartDocx.containsSmartTags(selectedPath)) {
+    return {
+      renderPath: selectedPath,
+      renderMode: 'strict',
+      smartTemplateUsed: false,
+      smartTemplatePath: null,
+      smartTemplateReason: 'selected template already contains smart tags'
+    };
+  }
+
+  if (!smartTemplateCopier.shouldSmartCopy(selectedPath)) {
+    return {
+      renderPath: selectedPath,
+      renderMode: 'legacy',
+      smartTemplateUsed: false,
+      smartTemplatePath: null,
+      smartTemplateReason: 'template is not an auto-smart supported template'
+    };
+  }
+
+  const autoPath = hiddenSmartTemplatePath(selectedPath);
+  const result = smartTemplateCopier.createSmartTemplateCopy(selectedPath, autoPath);
+  if (result.ok && smartDocx.containsSmartTags(autoPath)) {
+    log(`[smart-template] Auto-converted selected regular template "${selectedName}" to hidden smart copy: ${autoPath}`);
+    return {
+      renderPath: autoPath,
+      renderMode: 'strict',
+      smartTemplateUsed: true,
+      smartTemplatePath: autoPath,
+      smartTemplateReason: 'selected regular template was auto-converted for strict rendering'
+    };
+  }
+
+  log(`[WARN] Could not auto-convert selected template "${selectedName}" to smart mode: ${result.reason || 'unknown reason'}. Falling back to legacy mode.`);
+  return {
+    renderPath: selectedPath,
+    renderMode: 'legacy',
+    smartTemplateUsed: false,
+    smartTemplatePath: null,
+    smartTemplateReason: result.reason || 'auto-convert failed'
+  };
 }
 
 // Open a file with its default Windows app — Word for .docx, Excel for .xlsx,
@@ -324,15 +393,7 @@ app.use('/files', express.static(OUTPUT_DIR));
 // -------- Templates: list local folder (recursive; returns relative paths) --------
 app.get('/templates', (_req, res) => {
   try {
-    const _allFiles = walkTemplates(TEMPLATES_DIR).filter(f => {
-      const base = f.split('/').pop();
-      if (base.startsWith('~$')) return false;
-      if (/[%,&()\[\]{}$;"'`]/.test(base)) return false;
-      if (/[\r\n\t]/.test(f)) return false;
-      if (f.length > 90) return false;
-      if (/\.pdf$/i.test(base)) return false;
-      return true;
-    });
+    const _allFiles = walkTemplates(TEMPLATES_DIR).filter(isVisibleTemplateChoice);
     const files = _allFiles
       .map(f => { try { return { p: f, m: fs.statSync(path.join(TEMPLATES_DIR, f)).mtimeMs }; } catch (_) { return { p: f, m: 0 }; } })
       .sort((a, b) => b.m - a.m)
@@ -364,16 +425,7 @@ app.get('/setup', async (_req, res) => {
 app.get('/sync-templates', async (_req, res) => {
   try {
     if (!AIRTABLE_TABLE_NAME) throw new Error('AIRTABLE_TABLE_NAME not set in .env');
-    ensureSmartTemplates('/sync-templates');
-    const _allFiles = walkTemplates(TEMPLATES_DIR).filter(f => {
-      const base = f.split('/').pop();
-      if (base.startsWith('~$')) return false;
-      if (/[%,&()\[\]{}$;"'`]/.test(base)) return false;
-      if (/[\r\n\t]/.test(f)) return false;
-      if (f.length > 90) return false;
-      if (/\.pdf$/i.test(base)) return false;
-      return true;
-    });
+    const _allFiles = walkTemplates(TEMPLATES_DIR).filter(isVisibleTemplateChoice);
     const files = _allFiles
       .map(f => { try { return { p: f, m: fs.statSync(path.join(TEMPLATES_DIR, f)).mtimeMs }; } catch (_) { return { p: f, m: 0 }; } })
       .sort((a, b) => b.m - a.m)
@@ -679,15 +731,24 @@ app.post('/generate', async (req, res) => {
     let missingTags = [];
     let templateWarnings = [];
     let validationWarnings = [];
+    let smartTemplateUsed = false;
+    let smartTemplatePath = null;
+    let smartTemplateReason = null;
     if (ext === '.docx') {
-      const docxContext = docxHandler.extractDocxContext(templatePath);
+      const renderTemplate = prepareDocxRenderTemplate(templatePath, templateName);
+      const renderTemplatePath = renderTemplate.renderPath;
+      renderMode = renderTemplate.renderMode;
+      smartTemplateUsed = renderTemplate.smartTemplateUsed;
+      smartTemplatePath = renderTemplate.smartTemplatePath;
+      smartTemplateReason = renderTemplate.smartTemplateReason;
+
+      const docxContext = docxHandler.extractDocxContext(renderTemplatePath);
       const templateText = docxContext.text;
       const projectFacts = projectRules.deriveProjectFacts(fields, {
         icapBoundariesFile: ICAP_BOUNDARIES_FILE
       });
-      const strictTemplate = smartDocx.containsSmartTags(templatePath);
-      renderMode = strictTemplate ? 'strict' : 'legacy';
-      log(`Template text length: ${templateText.length} chars; marked yellow/red targets: ${docxContext.markedTargets.length}; render mode: ${renderMode}.`);
+      const strictTemplate = renderMode === 'strict';
+      log(`Template text length: ${templateText.length} chars; marked yellow/red targets: ${docxContext.markedTargets.length}; render mode: ${renderMode}; smartTemplateUsed: ${smartTemplateUsed}.`);
       log('Project rule facts:', projectFacts);
       if (projectFacts.icap && projectFacts.icap.isIcap && !projectFacts.icap.checked) {
         log('[WARN] ICAP term was not resolved:', projectFacts.icap.reason);
@@ -701,7 +762,7 @@ app.post('/generate', async (req, res) => {
         if (templateWarnings.length) log('[WARN] Smart template warnings:', templateWarnings);
         if (validationWarnings.length) log('[WARN] Smart value warnings:', validationWarnings);
 
-        const strictResult = smartDocx.renderSmartDocx(templatePath, tagBuild.values, outputPath, { log });
+        const strictResult = smartDocx.renderSmartDocx(renderTemplatePath, tagBuild.values, outputPath, { log });
         filledTags = strictResult.filledTags;
         missingTags = strictResult.missingTags;
         if (missingTags.length) {
@@ -722,6 +783,9 @@ app.post('/generate', async (req, res) => {
           missingTags,
           templateWarnings,
           validationWarnings,
+          smartTemplateUsed,
+          smartTemplatePath,
+          smartTemplateReason,
           docxValidation
         };
       } else {
@@ -758,7 +822,7 @@ app.post('/generate', async (req, res) => {
         } else {
           log('No building-config rewrites produced (neither AI configuration_claims nor labeled-line backstop fired).');
         }
-        const result = docxHandler.fillDocxSwaps(templatePath, swaps, outputPath, {
+        const result = docxHandler.fillDocxSwaps(renderTemplatePath, swaps, outputPath, {
           markerEvaluator: (paragraphText) => projectRules.evaluateTemplateMarkerText(paragraphText, fields, projectFacts),
           log
         });
@@ -878,6 +942,9 @@ app.post('/generate', async (req, res) => {
       uploadedToAirtable,
       uploadError,
       renderMode,
+      smartTemplateUsed,
+      smartTemplatePath,
+      smartTemplateReason,
       filledTags,
       missingTags,
       templateWarnings,
@@ -896,7 +963,6 @@ app.post('/generate', async (req, res) => {
 require('./pick-and-run')(app, { airtable, log, TEMPLATES_DIR, TEMPLATE_SELECT_FIELD, PORT });
 
 app.listen(PORT, () => {
-  ensureSmartTemplates('startup');
   console.log('');
   console.log('  Airtable Document Agent');
   console.log('  ------------------------');
