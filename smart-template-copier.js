@@ -97,6 +97,38 @@ function summaryLineFor(text) {
   return suffix ? `Property Summary: {{Property_Summary}} – ${suffix}` : 'Property Summary: {{Property_Summary}}';
 }
 
+function valuationSlotForText(text, used) {
+  const clean = String(text || '').trim();
+  if (isValuationStart(clean) && !used.has('heading')) return ['heading', '{{Tax_Valuation_Heading}}'];
+  if (/^Projected Assessed Value Increase and Phase-In/i.test(clean) && !used.has('phaseHeading')) {
+    return ['phaseHeading', '{{Tax_Valuation_Phase_Heading}}'];
+  }
+  if (/^The New York Real Property Tax Law/i.test(clean) && !used.has('rptlParagraph')) {
+    return ['rptlParagraph', '{{Tax_Valuation_RPTL_Paragraph}}'];
+  }
+  if (/^(We believe|We anticipate)/i.test(clean) && !used.has('phaseParagraph')) {
+    return ['phaseParagraph', '{{Tax_Valuation_Phase_Paragraph}}'];
+  }
+  if (/^(Under the DOF|Under New York Real Property Tax Law)/i.test(clean) && !used.has('primaryParagraph')) {
+    return ['primaryParagraph', '{{Tax_Valuation_Primary_Paragraph}}'];
+  }
+  return null;
+}
+
+function valuationPlaceholderParagraphs(range) {
+  const used = new Set();
+  const rendered = [];
+  for (const p of range) {
+    const slot = valuationSlotForText(p.text, used);
+    if (!slot) continue;
+    used.add(slot[0]);
+    rendered.push(paragraphLike(p.xml, slot[1]));
+  }
+  if (!used.has('heading') && range[0]) rendered.unshift(paragraphLike(range[0].xml, '{{Tax_Valuation_Heading}}'));
+  if (!used.has('primaryParagraph') && range[1]) rendered.push(paragraphLike(range[1].xml, '{{Tax_Valuation_Primary_Paragraph}}'));
+  return rendered.join('');
+}
+
 function shouldSmartCopy(filePath) {
   const base = path.basename(filePath);
   if (!/\.docx$/i.test(base)) return false;
@@ -185,9 +217,9 @@ function rewriteDocumentXml(xml) {
     }
 
     if (isValuationStart(text)) {
-      out += paragraphLike(p.xml, '{{Tax_Valuation_Block}}');
       let next = i + 1;
       while (next < paragraphs.length && !isPostCompletionStart(paragraphs[next].text)) next++;
+      out += valuationPlaceholderParagraphs(paragraphs.slice(i, next));
       cursor = paragraphs[next] ? paragraphs[next].start : p.end;
       i = next;
       changed = true;

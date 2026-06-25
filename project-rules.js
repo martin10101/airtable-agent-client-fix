@@ -427,6 +427,42 @@ function buildTaxValuationBlock(fields, facts, warnings) {
   ].join('\n');
 }
 
+function buildSmartTaxValuationParts(fields, facts, warnings) {
+  const units = facts && facts.units != null ? facts.units : parseNumber(getField(fields, 'Units'));
+  const workTerm = permitWorkTerm(facts);
+  const phaseWorkTerm = workTerm || '[Permit Type missing]';
+  if (!workTerm) warnings.push('Permit Type is missing or unclear; Construction_Type cannot be selected.');
+  if (units == null) {
+    warnings.push('Units is missing; Tax_Valuation_Block cannot choose transitional vs 2A/2B/2C cap.');
+    return {};
+  }
+
+  if (units > 10) {
+    return {
+      heading: 'Transitional Assessed Valuation',
+      primaryParagraph: "Under the DOF's rules and regulations, multiple Class A residential units will be classified as Tax Class 2.",
+      rptlParagraph: 'The New York Real Property Tax Law ("RPTL"), Section 1805, establishes a transition assessment system in the City of New York. Under this system, the usual increase in a property’s actual assessed value from one year to the next is phased in over five years in equal installments. The five-year phase-in does not apply to increases attributable to new construction or other physical improvements to the property. Increases attributable to such physical improvements or new construction are added in full to the following year’s assessment. Pursuant to RPTL Section 1805, the taxable assessment is the lesser of the actual assessed valuation and the transition assessed valuation.',
+      phaseHeading: 'Projected Assessed Value Increase and Phase-In',
+      phaseParagraph: `We believe there will be a substantial increase in market value for tax years 2027/28 and/or 2028/29 due to the ${phaseWorkTerm}, and that the resulting increase in assessed value will be reflected immediately on the assessment roll. However, in future years, increases in assessed value will likely result in the taxable assessment being based on a phased-in transition assessment.`
+    };
+  }
+
+  return {
+    heading: 'Tax Class 2a, 2b and 2c CAP',
+    primaryParagraph: 'Under New York Real Property Tax Law Section 1805, properties in tax classes 2a, 2b, and 2c are subject to an 8% cap on annual assessment increases. Specifically, the law provides that an assessor of any special assessing unit "shall not increase the assessed value of any tax class 2a, 2b, and 2c properties" in a single year by more than 8% of the previous year’s assessed value, as listed on the assessment roll. Additionally, the assessor cannot increase the assessed value of these properties by more than 30% within any five-year period. The assessment cap does not apply to increases resulting from physical changes or the expiration of any tax exemptions or abatements.'
+  };
+}
+
+function taxValuationBlockFromParts(parts) {
+  return [
+    parts.heading,
+    parts.primaryParagraph,
+    parts.rptlParagraph,
+    parts.phaseHeading,
+    parts.phaseParagraph
+  ].filter(Boolean).join('\n');
+}
+
 function buildProjectDetailsBlock(fields, facts, warnings) {
   const aiAnswer = aiAnswersText(fields);
   if (aiAnswer) return aiAnswer;
@@ -458,6 +494,7 @@ function buildSmartDocxTags(fields, facts, opts) {
   const block = normalizeBlock(getField(fields, 'Block'));
   const lot = normalizeBlock(getField(fields, 'Lot'));
   const address = asString(getField(fields, 'Property Address') || getField(fields, 'Project Address') || getField(fields, 'Address'));
+  const taxParts = buildSmartTaxValuationParts(fields, facts, warnings);
   if (!workTerm) warnings.push('Permit Type is missing or unclear; Construction_Type was left blank.');
 
   add('Property_Address', address);
@@ -481,7 +518,12 @@ function buildSmartDocxTags(fields, facts, opts) {
   add('Commercial_Clause', facts && facts.hasCommercial ? 'and commercial space' : '');
   add('ICAP_Term', facts && facts.icap ? asString(facts.icap.term) : '');
   add('ICAP_Years', facts && facts.icap ? asString(facts.icap.term) : '');
-  add('Tax_Valuation_Block', buildTaxValuationBlock(fields, facts, warnings));
+  add('Tax_Valuation_Block', taxValuationBlockFromParts(taxParts));
+  add('Tax_Valuation_Heading', taxParts.heading || '');
+  add('Tax_Valuation_Primary_Paragraph', taxParts.primaryParagraph || '');
+  add('Tax_Valuation_RPTL_Paragraph', taxParts.rptlParagraph || '');
+  add('Tax_Valuation_Phase_Heading', taxParts.phaseHeading || '');
+  add('Tax_Valuation_Phase_Paragraph', taxParts.phaseParagraph || '');
 
   for (const [name, value] of Object.entries(fields || {})) {
     const key = smartTagKey(name);
