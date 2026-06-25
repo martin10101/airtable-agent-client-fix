@@ -91,6 +91,12 @@ function isPostCompletionStart(text) {
   return /^Post-Completion Projected Assessed Value and Tax Liability/i.test(text);
 }
 
+function summaryLineFor(text) {
+  const suffixMatch = String(text || '').match(/\s+[–-]\s*(.+)$/);
+  const suffix = suffixMatch ? suffixMatch[1].trim() : '';
+  return suffix ? `Property Summary: {{Property_Summary}} – ${suffix}` : 'Property Summary: {{Property_Summary}}';
+}
+
 function shouldSmartCopy(filePath) {
   const base = path.basename(filePath);
   if (!/\.docx$/i.test(base)) return false;
@@ -106,6 +112,7 @@ function rewriteDocumentXml(xml) {
   let changed = false;
   let insideProjectDetails = false;
   let projectBlockInserted = false;
+  let summaryInserted = false;
 
   for (let i = 0; i < paragraphs.length;) {
     const p = paragraphs[i];
@@ -154,7 +161,10 @@ function rewriteDocumentXml(xml) {
     }
 
     if (/^(Project Details|Property Summary)\s*:/i.test(text)) {
-      out += paragraphLike(p.xml, 'Property Summary: {{Property_Summary}}');
+      if (!summaryInserted) {
+        out += paragraphLike(p.xml, summaryLineFor(text));
+        summaryInserted = true;
+      }
       cursor = p.end;
       i++;
       changed = true;
