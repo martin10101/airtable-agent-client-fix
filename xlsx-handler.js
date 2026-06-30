@@ -366,6 +366,14 @@ function getField(fieldsLookup, names) {
   return null;
 }
 
+function parseListField(value) {
+  if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
+  return String(value == null ? '' : value)
+    .split(/[,\n;]+/)
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
 function parseNumberLike(value, isPercent) {
   if (typeof value === 'number') {
     if (isPercent && Math.abs(value) > 1.5) return value / 100;
@@ -495,6 +503,16 @@ const LABEL_RULES = [
     fields: ['Taxable AV', 'Taxable Assessed Value']
   },
   {
+    label: 'Average Rent per Unit',
+    patterns: [/\baverage\s+rent\s+per\s+unit\b/i, /\brentome?e?tor\b/i],
+    fields: ['Average Rent per Unit', 'Average Rent', 'Rentometer Average Rent', 'Rentomeetor Average Rent']
+  },
+  {
+    label: 'Expense per SF',
+    patterns: [/\bexpense\s+per\s+sf\b/i, /\bexpense\s+psf\b/i],
+    fields: ['Expense per SF', 'Expense PSF', 'Guidelines Expense per SF']
+  },
+  {
     label: 'Land Increase',
     patterns: [/\bland\s+increase\b/i],
     fields: ['Land Increase']
@@ -587,6 +605,9 @@ function fillYellowCellsFromFields(templatePath, fields, outputPath, opts = {}) 
     const parsed = parseSheetCells(xml, sharedStrings);
     const yellowCells = parsed.cells.filter((cell) => yellowStyleIndexes.has(cell.styleIndex));
     const updates = new Map();
+    const mergerField = getField(fieldsLookup, ['Merger/Apportionment', 'Merger Apportionment', 'Apportionment Lots', 'Merged Lots']);
+    const mergerLots = mergerField ? parseListField(mergerField.value) : [];
+    let mergerLotIndex = 0;
 
     const sheetSummary = {
       sheet: sheet.name,
@@ -612,6 +633,32 @@ function fillYellowCellsFromFields(templatePath, fields, outputPath, opts = {}) 
       if (cell.hasFormula) {
         sheetSummary.skippedFormula += 1;
         result.skippedFormula.push({ ...baseInfo, reason: 'formula cell' });
+        continue;
+      }
+
+      if (/^lot$/i.test(String(cell.aboveLabel || '').trim()) && mergerLotIndex < mergerLots.length) {
+        const lotValue = mergerLots[mergerLotIndex];
+        mergerLotIndex += 1;
+        const newXml = buildCellXml(cell, lotValue);
+        updates.set(cell.ref, {
+          xml: newXml,
+          newValue: lotValue,
+          resolved: {
+            status: 'fill',
+            rule: 'Merger/Apportionment Lot',
+            fieldName: mergerField.name,
+            value: lotValue,
+            labelText: cell.aboveLabel
+          }
+        });
+        sheetSummary.filled += 1;
+        result.filled.push({
+          ...baseInfo,
+          fieldName: mergerField.name,
+          rule: 'Merger/Apportionment Lot',
+          newValue: lotValue,
+          labelText: cell.aboveLabel
+        });
         continue;
       }
 
