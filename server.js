@@ -34,7 +34,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-25-auto-smart-regular-template-v25';
+const APP_VERSION = '2026-06-30-xlsx-yellow-xml-v1';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -863,22 +863,42 @@ app.post('/generate', async (req, res) => {
         };
       }
     } else if (ext === '.xlsx') {
-      const workbookJson = await xlsxHandler.extractXlsxContent(templatePath);
-      log(`Workbook JSON length: ${workbookJson.length} chars. Fetching table schema...`);
-      const schema = await airtable.getTableSchema(AIRTABLE_TABLE_NAME);
-      log(`Schema has ${schema.length} fields. Calling Claude (xlsx swap mode)...`);
-      const swapsBySheet = await agent.mapXlsxSwaps(workbookJson, fields, schema, {
-        templateFieldName: TEMPLATE_FIELD,
-        outputFieldName: OUTPUT_FIELD,
-        templateSelectFieldName: TEMPLATE_SELECT_FIELD
-      });
-      const totalProposed = Object.values(swapsBySheet).reduce((n, a) => n + a.length, 0);
-      log(`Claude returned ${totalProposed} cell swaps across ${Object.keys(swapsBySheet).length} sheet(s)`);
-      const result = await xlsxHandler.fillXlsxSwaps(templatePath, swapsBySheet, outputPath);
-      log(`Applied ${result.applied.length}, mismatched ${result.mismatched.length}, skipped-formula ${result.skippedFormula.length}`);
+      renderMode = 'xlsx-yellow-fill-xml';
+      log('[xlsx] Filling Excel template in deterministic yellow-cell XML mode. Claude is not used for Excel fills.');
+      const result = xlsxHandler.fillYellowCellsFromFields(templatePath, fields, outputPath);
+      log(`[xlsx] Yellow styles: ${result.yellowStyleIndexes.join(', ') || '(none)'}`);
+      for (const sheet of result.sheets) {
+        log(`[xlsx] Sheet "${sheet.sheet}": yellow=${sheet.yellowCellsFound}, filled=${sheet.filled}, skippedFormula=${sheet.skippedFormula}, noValue=${sheet.noValue}, unmatched=${sheet.unmatched}`);
+      }
+      for (const item of result.filled) {
+        log(`[xlsx-fill] ${item.sheet}!${item.cellRef}: "${item.leftLabel || item.aboveLabel || item.labelText}" <- ${item.fieldName} = ${JSON.stringify(item.newValue)} (old=${JSON.stringify(item.oldValue)})`);
+      }
+      for (const item of result.skippedFormula) {
+        log(`[xlsx-skip-formula] ${item.sheet}!${item.cellRef}: "${item.leftLabel || item.aboveLabel || item.oldValue}" kept because it is a formula cell`);
+      }
+      for (const item of result.noValue) {
+        log(`[xlsx-no-value] ${item.sheet}!${item.cellRef}: "${item.leftLabel || item.aboveLabel || item.labelText}" matched ${item.rule}, but Airtable value was blank/missing`);
+      }
+      for (const item of result.unmatchedYellowCells) {
+        log(`[xlsx-unmatched-yellow] ${item.sheet}!${item.cellRef}: old=${JSON.stringify(item.oldValue)}, left=${JSON.stringify(item.leftLabel)}, above=${JSON.stringify(item.aboveLabel)} (${item.reason})`);
+      }
+      for (const item of result.formulaIntegrity) {
+        log(`[xlsx-formula-check] ${item.sheet}: before=${item.before}, after=${item.after}, ok=${item.ok}`);
+      }
+      if (result.warnings.length) log('[xlsx-warnings]', result.warnings);
       swapSummary = {
-        applied: result.applied.map((s) => ({ fieldName: s.fieldName, oldValue: s.oldValue, newValue: s.newValue, count: 1, sheet: s.sheet, cellRef: s.cellRef })),
-        missed: result.mismatched.map((s) => ({ fieldName: s.fieldName, oldValue: s.oldValue, sheet: s.sheet, cellRef: s.cellRef, note: 'cell value did not match Claude\'s oldValue' }))
+        renderMode,
+        xlsxMode: result.mode,
+        yellowStyleIndexes: result.yellowStyleIndexes,
+        sheets: result.sheets,
+        filledCells: result.filled,
+        skippedFormulaCells: result.skippedFormula,
+        noValueCells: result.noValue,
+        unmatchedYellowCells: result.unmatchedYellowCells,
+        formulaIntegrity: result.formulaIntegrity,
+        warnings: result.warnings,
+        applied: result.filled.map((s) => ({ fieldName: s.fieldName, oldValue: s.oldValue, newValue: s.newValue, count: 1, sheet: s.sheet, cellRef: s.cellRef })),
+        missed: result.unmatchedYellowCells.map((s) => ({ oldValue: s.oldValue, sheet: s.sheet, cellRef: s.cellRef, note: s.reason }))
       };
     } else if (ext === '.pdf') {
       const pdfInfo = await pdfHandler.extractPdfContent(templatePath);
