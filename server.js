@@ -34,7 +34,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-30-xlsx-yellow-xml-v2';
+const APP_VERSION = '2026-06-30-xlsx-yellow-xml-v3';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -885,6 +885,7 @@ app.post('/generate', async (req, res) => {
       for (const item of result.formulaIntegrity) {
         log(`[xlsx-formula-check] ${item.sheet}: before=${item.before}, after=${item.after}, ok=${item.ok}`);
       }
+      if (result.recalculation) log('[xlsx-recalc]', result.recalculation);
       if (result.warnings.length) log('[xlsx-warnings]', result.warnings);
       swapSummary = {
         renderMode,
@@ -896,6 +897,7 @@ app.post('/generate', async (req, res) => {
         noValueCells: result.noValue,
         unmatchedYellowCells: result.unmatchedYellowCells,
         formulaIntegrity: result.formulaIntegrity,
+        recalculation: result.recalculation,
         warnings: result.warnings,
         applied: result.filled.map((s) => ({ fieldName: s.fieldName, oldValue: s.oldValue, newValue: s.newValue, count: 1, sheet: s.sheet, cellRef: s.cellRef })),
         missed: result.unmatchedYellowCells.map((s) => ({ oldValue: s.oldValue, sheet: s.sheet, cellRef: s.cellRef, note: s.reason }))

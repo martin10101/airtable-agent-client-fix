@@ -567,6 +567,47 @@ function countFormulas(sheetXml) {
   return (String(sheetXml || '').match(/<f\b/g) || []).length;
 }
 
+function forceWorkbookRecalculation(zip) {
+  const result = { forced: false, calcChainRemoved: false, workbookRelsCleaned: false, contentTypesCleaned: false };
+  const workbookXml = getZipText(zip, 'xl/workbook.xml');
+  if (workbookXml) {
+    const attrs = ' calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1" calcOnSave="1"';
+    let nextXml;
+    if (/<calcPr\b/.test(workbookXml)) {
+      nextXml = workbookXml.replace(/<calcPr\b([^>]*?)(?:\/>|>[\s\S]*?<\/calcPr>)/, (_m, attrText) => {
+        let nextAttrs = attrText || '';
+        nextAttrs = setAttr(nextAttrs, 'calcMode', 'auto');
+        nextAttrs = setAttr(nextAttrs, 'fullCalcOnLoad', '1');
+        nextAttrs = setAttr(nextAttrs, 'forceFullCalc', '1');
+        nextAttrs = setAttr(nextAttrs, 'calcOnSave', '1');
+        return `<calcPr${nextAttrs}/>`;
+      });
+    } else {
+      nextXml = workbookXml.replace(/<\/workbook>\s*$/, `<calcPr${attrs}/></workbook>`);
+    }
+    zip.file('xl/workbook.xml', nextXml);
+    result.forced = true;
+  }
+
+  if (zip.file('xl/calcChain.xml')) {
+    zip.remove('xl/calcChain.xml');
+    result.calcChainRemoved = true;
+  }
+
+  const relsXml = getZipText(zip, 'xl/_rels/workbook.xml.rels');
+  if (relsXml && /calcChain/i.test(relsXml)) {
+    zip.file('xl/_rels/workbook.xml.rels', relsXml.replace(/<Relationship\b[^>]*calcChain[^>]*\/?>/gi, ''));
+    result.workbookRelsCleaned = true;
+  }
+
+  const contentTypesXml = getZipText(zip, '[Content_Types].xml');
+  if (contentTypesXml && /calcChain/i.test(contentTypesXml)) {
+    zip.file('[Content_Types].xml', contentTypesXml.replace(/<Override\b[^>]*\/xl\/calcChain\.xml[^>]*\/?>/gi, ''));
+    result.contentTypesCleaned = true;
+  }
+  return result;
+}
+
 function fillYellowCellsFromFields(templatePath, fields, outputPath, opts = {}) {
   const buffer = fs.readFileSync(templatePath);
   const zip = new PizZip(buffer);
@@ -585,6 +626,7 @@ function fillYellowCellsFromFields(templatePath, fields, outputPath, opts = {}) 
     unmatchedYellowCells: [],
     noValue: [],
     formulaIntegrity: [],
+    recalculation: null,
     warnings: []
   };
 
@@ -712,6 +754,7 @@ function fillYellowCellsFromFields(templatePath, fields, outputPath, opts = {}) 
     throw new Error('Refusing to write XLSX because formula count changed. See Excel log details.');
   }
 
+  result.recalculation = forceWorkbookRecalculation(zip);
   const outBuffer = zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
   fs.writeFileSync(outputPath, outBuffer);
   return result;
