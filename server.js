@@ -34,7 +34,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-06-30-xlsx-yellow-xml-v3';
+const APP_VERSION = '2026-07-13-docx-date-spacing-no-highlights-v1';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -731,6 +731,7 @@ app.post('/generate', async (req, res) => {
     let missingTags = [];
     let templateWarnings = [];
     let validationWarnings = [];
+    let finalDocxPresentation = null;
     let smartTemplateUsed = false;
     let smartTemplatePath = null;
     let smartTemplateReason = null;
@@ -920,6 +921,24 @@ app.post('/generate', async (req, res) => {
       throw new Error(`Unsupported template type: ${ext}. Expected .docx, .xlsx, or .pdf`);
     }
 
+    if (ext === '.docx') {
+      finalDocxPresentation = docxHandler.applyFinalDocxPresentation(outputPath, {
+        blankLinesAfterDate: 5,
+        removeHighlights: true,
+        log
+      });
+      docxValidation = docxHandler.validateDocx(outputPath);
+      if (docxValidation.ok) {
+        log(`[docx-check] OK after final presentation cleanup: ${docxValidation.checkedParts} XML part(s) checked.`);
+      } else {
+        log('[WARN] DOCX validation after final presentation cleanup found issue(s):', docxValidation.problems);
+      }
+      if (swapSummary && typeof swapSummary === 'object') {
+        swapSummary.finalDocxPresentation = finalDocxPresentation;
+        swapSummary.docxValidation = docxValidation;
+      }
+    }
+
     log('Written to:', outputPath);
     if (ext === '.docx') {
       const shouldRunWordRepair = renderMode !== 'strict' || !docxValidation || !docxValidation.ok;
@@ -971,6 +990,7 @@ app.post('/generate', async (req, res) => {
       missingTags,
       templateWarnings,
       validationWarnings,
+      finalDocxPresentation,
       swaps: swapSummary,
       docxValidation,
       wordRepair,

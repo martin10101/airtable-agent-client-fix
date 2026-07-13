@@ -338,6 +338,138 @@ function extractParagraphText(paragraphXml) {
   return pieces.join('');
 }
 
+function collectParagraphXml(xml) {
+  const paragraphs = [];
+  const re = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    paragraphs.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      xml: m[0],
+      text: extractParagraphText(m[0]).replace(/\s+/g, ' ').trim()
+    });
+  }
+  return paragraphs;
+}
+
+function looksLikeLetterDate(text) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean || clean.length > 90) return false;
+  return (
+    /^(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}$/i.test(clean) ||
+    /^DATE\s+\\@\s+"[^"]+"\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}$/i.test(clean) ||
+    /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(clean) ||
+    /^\d{4}-\d{1,2}-\d{1,2}$/.test(clean)
+  );
+}
+
+function paragraphPropertiesFromXml(paragraphXml) {
+  const match = paragraphXml.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/);
+  return match ? match[0] : '';
+}
+
+function blankParagraphLike(paragraphXml) {
+  const open = (paragraphXml.match(/^<w:p\b[^>]*>/) || ['<w:p>'])[0];
+  return `${open}${paragraphPropertiesFromXml(paragraphXml)}<w:r><w:t></w:t></w:r></w:p>`;
+}
+
+function ensureBlankParagraphsAfterDate(xml, count, log) {
+  const wanted = Number(count) || 0;
+  if (wanted <= 0) return { xml, inserted: 0, dateText: null, reason: 'disabled' };
+  const paragraphs = collectParagraphXml(xml);
+  const maxSearch = Math.min(paragraphs.length, 40);
+  for (let i = 0; i < maxSearch; i++) {
+    const p = paragraphs[i];
+    if (!looksLikeLetterDate(p.text)) continue;
+    let existingBlank = 0;
+    let next = i + 1;
+    while (next < paragraphs.length && !paragraphs[next].text) {
+      existingBlank++;
+      next++;
+    }
+    const missing = Math.max(0, wanted - existingBlank);
+    if (!missing) return { xml, inserted: 0, dateText: p.text, existingBlank };
+    const blanks = Array.from({ length: missing }, () => blankParagraphLike(p.xml)).join('');
+    const out = xml.slice(0, p.end) + blanks + xml.slice(p.end);
+    const dlog = typeof log === 'function' ? log : (() => {});
+    dlog(`[docx-presentation] Added ${missing} blank paragraph(s) after date "${p.text}" (${existingBlank} already present).`);
+    return { xml: out, inserted: missing, dateText: p.text, existingBlank };
+  }
+  return { xml, inserted: 0, dateText: null, reason: 'date paragraph not found near top of document' };
+}
+
+function removeHighlightMarkup(xml) {
+  let removedHighlight = 0;
+  let removedHighlightPairs = 0;
+  const out = String(xml || '')
+    .replace(/<w:highlight\b[^>]*\/>/g, () => {
+      removedHighlight++;
+      return '';
+    })
+    .replace(/<w:highlight\b[^>]*>[\s\S]*?<\/w:highlight>/g, () => {
+      removedHighlightPairs++;
+      return '';
+    });
+  return { xml: out, removedHighlight: removedHighlight + removedHighlightPairs };
+}
+
+function applyFinalDocxPresentation(filePath, opts = {}) {
+  const log = typeof opts.log === 'function' ? opts.log : (() => {});
+  const zip = new PizZip(fs.readFileSync(filePath));
+  const result = {
+    blankLinesAfterDate: Number(opts.blankLinesAfterDate) || 0,
+    dateSpacing: null,
+    removedHighlights: 0,
+    touchedParts: []
+  };
+
+  for (const name of DOCX_TEXT_TARGETS) {
+    const file = zip.file(name);
+    if (!file) continue;
+    let xml = file.asText();
+    let changed = false;
+
+    if (opts.removeHighlights !== false) {
+      const highlightResult = removeHighlightMarkup(xml);
+      xml = highlightResult.xml;
+      if (highlightResult.removedHighlight) {
+        result.removedHighlights += highlightResult.removedHighlight;
+        changed = true;
+      }
+    }
+
+    if (name === 'word/document.xml' && result.blankLinesAfterDate > 0) {
+      const spacingResult = ensureBlankParagraphsAfterDate(xml, result.blankLinesAfterDate, log);
+      xml = spacingResult.xml;
+      result.dateSpacing = {
+        inserted: spacingResult.inserted,
+        dateText: spacingResult.dateText,
+        existingBlank: spacingResult.existingBlank || 0,
+        reason: spacingResult.reason || null
+      };
+      if (spacingResult.inserted) changed = true;
+    }
+
+    if (changed) {
+      zip.file(name, xml);
+      result.touchedParts.push(name);
+    }
+  }
+
+  if (result.removedHighlights) {
+    log(`[docx-presentation] Removed ${result.removedHighlights} highlight tag(s) from generated letter.`);
+  } else if (opts.removeHighlights !== false) {
+    log('[docx-presentation] No highlight tags found to remove.');
+  }
+  if (result.dateSpacing && result.dateSpacing.reason) {
+    log(`[docx-presentation] Date spacing not changed: ${result.dateSpacing.reason}`);
+  }
+
+  fs.writeFileSync(filePath, zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' }));
+  return result;
+}
+
 function applyTemplateMarkers(xml, markerEvaluator, log) {
   if (typeof markerEvaluator !== 'function') return xml;
   const dlog = typeof log === 'function' ? log : (() => {});
@@ -688,4 +820,11 @@ function fillDocxSwaps(templatePath, swaps, outputPath, opts) {
   return { outputPath, applied, missed };
 }
 
-module.exports = { extractDocxText, extractDocxMarkedTargets, extractDocxContext, fillDocxSwaps, validateDocx };
+module.exports = {
+  extractDocxText,
+  extractDocxMarkedTargets,
+  extractDocxContext,
+  fillDocxSwaps,
+  validateDocx,
+  applyFinalDocxPresentation
+};
