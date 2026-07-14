@@ -389,14 +389,126 @@ function ensureBlankParagraphsAfterDate(xml, count, log) {
       next++;
     }
     const missing = Math.max(0, wanted - existingBlank);
-    if (!missing) return { xml, inserted: 0, dateText: p.text, existingBlank };
-    const blanks = Array.from({ length: missing }, () => blankParagraphLike(p.xml)).join('');
-    const out = xml.slice(0, p.end) + blanks + xml.slice(p.end);
+    const extra = Math.max(0, existingBlank - wanted);
+    if (!missing && !extra) return { xml, inserted: 0, removed: 0, dateText: p.text, existingBlank };
+    let out = xml;
+    if (extra) {
+      const removeStart = paragraphs[i + 1 + wanted].start;
+      const removeEnd = paragraphs[i + 1 + existingBlank - 1].end;
+      out = xml.slice(0, removeStart) + xml.slice(removeEnd);
+    } else if (missing) {
+      const blanks = Array.from({ length: missing }, () => blankParagraphLike(p.xml)).join('');
+      out = xml.slice(0, p.end) + blanks + xml.slice(p.end);
+    }
     const dlog = typeof log === 'function' ? log : (() => {});
-    dlog(`[docx-presentation] Added ${missing} blank paragraph(s) after date "${p.text}" (${existingBlank} already present).`);
-    return { xml: out, inserted: missing, dateText: p.text, existingBlank };
+    if (missing) dlog(`[docx-presentation] Added ${missing} blank paragraph(s) after date "${p.text}" (${existingBlank} already present).`);
+    if (extra) dlog(`[docx-presentation] Removed ${extra} extra blank paragraph(s) after date "${p.text}" (${existingBlank} were present).`);
+    return { xml: out, inserted: missing, removed: extra, dateText: p.text, existingBlank };
   }
   return { xml, inserted: 0, dateText: null, reason: 'date paragraph not found near top of document' };
+}
+
+function ensureBlankParagraphsAfterFirstMatch(xml, predicate, count, label, log) {
+  const wanted = Number(count) || 0;
+  const paragraphs = collectParagraphXml(xml);
+  for (let i = 0; i < paragraphs.length; i++) {
+    const p = paragraphs[i];
+    if (!predicate(p.text, i)) continue;
+    let existingBlank = 0;
+    let next = i + 1;
+    while (next < paragraphs.length && !paragraphs[next].text) {
+      existingBlank++;
+      next++;
+    }
+    const missing = Math.max(0, wanted - existingBlank);
+    const extra = Math.max(0, existingBlank - wanted);
+    if (!missing && !extra) return { xml, inserted: 0, removed: 0, text: p.text, existingBlank };
+    let out = xml;
+    if (extra) {
+      const removeStart = paragraphs[i + 1 + wanted].start;
+      const removeEnd = paragraphs[i + 1 + existingBlank - 1].end;
+      out = xml.slice(0, removeStart) + xml.slice(removeEnd);
+    } else if (missing) {
+      const blanks = Array.from({ length: missing }, () => blankParagraphLike(p.xml)).join('');
+      out = xml.slice(0, p.end) + blanks + xml.slice(p.end);
+    }
+    const dlog = typeof log === 'function' ? log : (() => {});
+    if (missing) dlog(`[docx-presentation] Added ${missing} blank paragraph(s) after ${label}.`);
+    if (extra) dlog(`[docx-presentation] Removed ${extra} extra blank paragraph(s) after ${label}.`);
+    return { xml: out, inserted: missing, removed: extra, text: p.text, existingBlank };
+  }
+  return { xml, inserted: 0, removed: 0, text: null, reason: `${label} paragraph not found` };
+}
+
+function removeDuplicateAggregateParagraphs(xml, log) {
+  const paragraphs = collectParagraphXml(xml);
+  const remove = new Set();
+  const seen = new Map();
+  for (let i = 0; i < paragraphs.length; i++) {
+    const text = paragraphs[i].text;
+    if (!/^The building will aggregate\b.*\bgross square feet\.?$/i.test(text)) continue;
+    const key = text.toLowerCase().replace(/\s+/g, ' ').replace(/[.]\s*$/, '').trim();
+    if (seen.has(key)) remove.add(i);
+    else seen.set(key, i);
+  }
+  if (!remove.size) return { xml, removed: 0 };
+
+  let out = '';
+  let cursor = 0;
+  for (let i = 0; i < paragraphs.length; i++) {
+    const p = paragraphs[i];
+    out += xml.slice(cursor, p.start);
+    if (!remove.has(i)) out += p.xml;
+    cursor = p.end;
+  }
+  out += xml.slice(cursor);
+  const dlog = typeof log === 'function' ? log : (() => {});
+  dlog(`[docx-presentation] Removed ${remove.size} duplicate aggregate gross-square-foot paragraph(s).`);
+  return { xml: out, removed: remove.size };
+}
+
+function setParagraphIndent(paragraphXml, attrs) {
+  const attrText = Object.entries(attrs)
+    .map(([key, value]) => `w:${key}="${String(value)}"`)
+    .join(' ');
+  const indTag = `<w:ind ${attrText}/>`;
+  if (/<w:pPr\b/.test(paragraphXml)) {
+    if (/<w:ind\b[^>]*(?:\/>|>[\s\S]*?<\/w:ind>)/.test(paragraphXml)) {
+      return paragraphXml.replace(/<w:ind\b[^>]*(?:\/>|>[\s\S]*?<\/w:ind>)/, indTag);
+    }
+    return paragraphXml.replace(/(<w:pPr\b[^>]*>)/, `$1${indTag}`);
+  }
+  return paragraphXml.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${indTag}</w:pPr>`);
+}
+
+function normalizeTopAddressIndent(xml, log) {
+  let changed = 0;
+  let seenDate = false;
+  let addressBlockOpen = false;
+  const out = xml.replace(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g, (paragraph) => {
+    const text = extractParagraphText(paragraph).replace(/\s+/g, ' ').trim();
+    if (!seenDate && looksLikeLetterDate(text)) {
+      seenDate = true;
+      return paragraph;
+    }
+    if (!seenDate) return paragraph;
+    if (/^RE\s*:/i.test(text)) {
+      addressBlockOpen = true;
+      changed++;
+      return setParagraphIndent(paragraph, { left: '720', firstLine: '720' });
+    }
+    if (addressBlockOpen && (/^[A-Za-z][A-Za-z .'-]+,\s*NY$/i.test(text) || /^Block\s*&\s*Lot\s*:/i.test(text))) {
+      changed++;
+      return setParagraphIndent(paragraph, { left: '720', firstLine: '720' });
+    }
+    if (addressBlockOpen && text) addressBlockOpen = false;
+    return paragraph;
+  });
+  if (changed) {
+    const dlog = typeof log === 'function' ? log : (() => {});
+    dlog(`[docx-presentation] Normalized indentation on ${changed} top address paragraph(s).`);
+  }
+  return { xml: out, changed };
 }
 
 function removeHighlightMarkup(xml) {
@@ -419,7 +531,11 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
   const zip = new PizZip(fs.readFileSync(filePath));
   const result = {
     blankLinesAfterDate: Number(opts.blankLinesAfterDate) || 0,
+    blankLinesAfterPropertySummary: opts.blankLinesAfterPropertySummary == null ? null : Number(opts.blankLinesAfterPropertySummary),
     dateSpacing: null,
+    propertySummarySpacing: null,
+    duplicateAggregateParagraphsRemoved: 0,
+    addressIndentParagraphsChanged: 0,
     removedHighlights: 0,
     touchedParts: []
   };
@@ -444,11 +560,42 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       xml = spacingResult.xml;
       result.dateSpacing = {
         inserted: spacingResult.inserted,
+        removed: spacingResult.removed || 0,
         dateText: spacingResult.dateText,
         existingBlank: spacingResult.existingBlank || 0,
         reason: spacingResult.reason || null
       };
-      if (spacingResult.inserted) changed = true;
+      if (spacingResult.inserted || spacingResult.removed) changed = true;
+    }
+
+    if (name === 'word/document.xml') {
+      const duplicateResult = removeDuplicateAggregateParagraphs(xml, log);
+      xml = duplicateResult.xml;
+      result.duplicateAggregateParagraphsRemoved = duplicateResult.removed;
+      if (duplicateResult.removed) changed = true;
+
+      const indentResult = normalizeTopAddressIndent(xml, log);
+      xml = indentResult.xml;
+      result.addressIndentParagraphsChanged = indentResult.changed;
+      if (indentResult.changed) changed = true;
+    }
+
+    if (name === 'word/document.xml' && result.blankLinesAfterPropertySummary != null) {
+      const summarySpacing = ensureBlankParagraphsAfterFirstMatch(
+        xml,
+        (text) => /^Property Summary\s*:/i.test(text),
+        result.blankLinesAfterPropertySummary,
+        'Property Summary',
+        log
+      );
+      xml = summarySpacing.xml;
+      result.propertySummarySpacing = {
+        inserted: summarySpacing.inserted,
+        removed: summarySpacing.removed,
+        existingBlank: summarySpacing.existingBlank || 0,
+        reason: summarySpacing.reason || null
+      };
+      if (summarySpacing.inserted || summarySpacing.removed) changed = true;
     }
 
     if (changed) {

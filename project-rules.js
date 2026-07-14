@@ -501,7 +501,7 @@ function buildProjectDetailsTemplateLines(fields, facts, warnings) {
   }
 
   const summary = projectSummary(fields, facts);
-  const gross = grossSqftTotalDescription(fields);
+  const gross = grossSqftDescription(fields);
   const lines = {
     aiLine: '',
     newResidentialLine: '',
