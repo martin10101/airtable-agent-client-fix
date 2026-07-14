@@ -467,6 +467,26 @@ function removeDuplicateAggregateParagraphs(xml, log) {
   return { xml: out, removed: remove.size };
 }
 
+function removeBlankParagraphsBetweenAggregateAndAffordable(xml, log) {
+  const paragraphs = collectParagraphXml(xml);
+  for (let i = 0; i < paragraphs.length; i++) {
+    const current = paragraphs[i];
+    if (!/^The building will aggregate\b.*\bgross square feet\.?$/i.test(current.text)) continue;
+    let next = i + 1;
+    while (next < paragraphs.length && !paragraphs[next].text) next++;
+    const blankCount = next - i - 1;
+    if (!blankCount) continue;
+    if (!paragraphs[next] || !/^Affordable units will be designated\b/i.test(paragraphs[next].text)) continue;
+    const removeStart = paragraphs[i + 1].start;
+    const removeEnd = paragraphs[next - 1].end;
+    const out = xml.slice(0, removeStart) + xml.slice(removeEnd);
+    const dlog = typeof log === 'function' ? log : (() => {});
+    dlog(`[docx-presentation] Removed ${blankCount} blank paragraph(s) between gross-square-foot item and affordable-units item.`);
+    return { xml: out, removed: blankCount };
+  }
+  return { xml, removed: 0 };
+}
+
 function setParagraphIndent(paragraphXml, attrs) {
   const attrText = Object.entries(attrs)
     .map(([key, value]) => `w:${key}="${String(value)}"`)
@@ -481,8 +501,23 @@ function setParagraphIndent(paragraphXml, attrs) {
   return paragraphXml.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${indTag}</w:pPr>`);
 }
 
+function replaceParagraphText(paragraphXml, newText) {
+  let replaced = false;
+  const escaped = escapeXml(newText);
+  const out = paragraphXml.replace(/<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t>/g, (tag) => {
+    if (!replaced) {
+      replaced = true;
+      return `<w:t xml:space="preserve">${escaped}</w:t>`;
+    }
+    return tag.replace(/>[\s\S]*?</, '></');
+  });
+  if (replaced) return out;
+  return paragraphXml.replace(/<\/w:p>\s*$/, `<w:r><w:t xml:space="preserve">${escaped}</w:t></w:r></w:p>`);
+}
+
 function normalizeTopAddressIndent(xml, log) {
   let changed = 0;
+  let rePrefixRemoved = 0;
   let seenDate = false;
   let addressBlockOpen = false;
   const out = xml.replace(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g, (paragraph) => {
@@ -495,7 +530,9 @@ function normalizeTopAddressIndent(xml, log) {
     if (/^RE\s*:/i.test(text)) {
       addressBlockOpen = true;
       changed++;
-      return setParagraphIndent(paragraph, { left: '720', firstLine: '720' });
+      rePrefixRemoved++;
+      const withoutRe = text.replace(/^RE\s*:\s*/i, '');
+      return setParagraphIndent(replaceParagraphText(paragraph, withoutRe), { left: '720', firstLine: '720' });
     }
     if (addressBlockOpen && (/^[A-Za-z][A-Za-z .'-]+,\s*NY$/i.test(text) || /^Block\s*&\s*Lot\s*:/i.test(text))) {
       changed++;
@@ -507,8 +544,9 @@ function normalizeTopAddressIndent(xml, log) {
   if (changed) {
     const dlog = typeof log === 'function' ? log : (() => {});
     dlog(`[docx-presentation] Normalized indentation on ${changed} top address paragraph(s).`);
+    if (rePrefixRemoved) dlog(`[docx-presentation] Removed top-address RE prefix from ${rePrefixRemoved} paragraph(s).`);
   }
-  return { xml: out, changed };
+  return { xml: out, changed, rePrefixRemoved };
 }
 
 function removeHighlightMarkup(xml) {
@@ -535,7 +573,9 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
     dateSpacing: null,
     propertySummarySpacing: null,
     duplicateAggregateParagraphsRemoved: 0,
+    projectDetailsBlankParagraphsRemoved: 0,
     addressIndentParagraphsChanged: 0,
+    topAddressRePrefixRemoved: 0,
     removedHighlights: 0,
     touchedParts: []
   };
@@ -574,9 +614,15 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       result.duplicateAggregateParagraphsRemoved = duplicateResult.removed;
       if (duplicateResult.removed) changed = true;
 
+      const projectSpacingResult = removeBlankParagraphsBetweenAggregateAndAffordable(xml, log);
+      xml = projectSpacingResult.xml;
+      result.projectDetailsBlankParagraphsRemoved = projectSpacingResult.removed;
+      if (projectSpacingResult.removed) changed = true;
+
       const indentResult = normalizeTopAddressIndent(xml, log);
       xml = indentResult.xml;
       result.addressIndentParagraphsChanged = indentResult.changed;
+      result.topAddressRePrefixRemoved = indentResult.rePrefixRemoved || 0;
       if (indentResult.changed) changed = true;
     }
 
