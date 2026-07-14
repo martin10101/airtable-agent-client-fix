@@ -467,24 +467,36 @@ function removeDuplicateAggregateParagraphs(xml, log) {
   return { xml: out, removed: remove.size };
 }
 
-function removeBlankParagraphsBetweenAggregateAndAffordable(xml, log) {
+function ensureBlankParagraphBetweenAggregateAndAffordable(xml, log) {
   const paragraphs = collectParagraphXml(xml);
   for (let i = 0; i < paragraphs.length; i++) {
     const current = paragraphs[i];
     if (!/^The building will aggregate\b.*\bgross square feet\.?$/i.test(current.text)) continue;
     let next = i + 1;
     while (next < paragraphs.length && !paragraphs[next].text) next++;
-    const blankCount = next - i - 1;
-    if (!blankCount) continue;
     if (!paragraphs[next] || !/^Affordable units will be designated\b/i.test(paragraphs[next].text)) continue;
-    const removeStart = paragraphs[i + 1].start;
-    const removeEnd = paragraphs[next - 1].end;
-    const out = xml.slice(0, removeStart) + xml.slice(removeEnd);
+    const wanted = 1;
+    const blankCount = next - i - 1;
+    if (blankCount === wanted) return { xml, inserted: 0, removed: 0, finalBlankCount: blankCount };
+    let out = xml;
+    let inserted = 0;
+    let removed = 0;
+    if (blankCount > wanted) {
+      const removeStart = paragraphs[i + 1 + wanted].start;
+      const removeEnd = paragraphs[next - 1].end;
+      out = xml.slice(0, removeStart) + xml.slice(removeEnd);
+      removed = blankCount - wanted;
+    } else {
+      const blanks = Array.from({ length: wanted - blankCount }, () => blankParagraphLike(current.xml)).join('');
+      out = xml.slice(0, current.end) + blanks + xml.slice(current.end);
+      inserted = wanted - blankCount;
+    }
     const dlog = typeof log === 'function' ? log : (() => {});
-    dlog(`[docx-presentation] Removed ${blankCount} blank paragraph(s) between gross-square-foot item and affordable-units item.`);
-    return { xml: out, removed: blankCount };
+    if (inserted) dlog(`[docx-presentation] Added ${inserted} blank paragraph(s) between gross-square-foot item and affordable-units item.`);
+    if (removed) dlog(`[docx-presentation] Removed ${removed} extra blank paragraph(s) between gross-square-foot item and affordable-units item.`);
+    return { xml: out, inserted, removed, finalBlankCount: wanted };
   }
-  return { xml, removed: 0 };
+  return { xml, inserted: 0, removed: 0, finalBlankCount: null };
 }
 
 function setParagraphIndent(paragraphXml, attrs) {
@@ -506,12 +518,14 @@ function setParagraphIndent(paragraphXml, attrs) {
   return paragraphXml.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${indTag}</w:pPr>`);
 }
 
-function removeRePrefixFromParagraph(paragraphXml) {
+function ensureRePrefixInParagraph(paragraphXml) {
   let replaced = false;
   return paragraphXml.replace(/(<w:t(?:\s[^>]*)?>)([\s\S]*?)(<\/w:t>)/g, (tag, open, text, close) => {
     if (replaced) return tag;
     const decoded = decodeXml(text);
-    const next = decoded.replace(/^RE\s*:\s*/i, '');
+    const next = /^RE\s*:/i.test(decoded)
+      ? decoded.replace(/^RE\s*:\s*/i, 'RE: ')
+      : `RE: ${decoded.replace(/^\s+/, '')}`;
     if (next === decoded) return tag;
     replaced = true;
     return `${open}${escapeXml(next)}${close}`;
@@ -520,7 +534,7 @@ function removeRePrefixFromParagraph(paragraphXml) {
 
 function normalizeTopAddressIndent(xml, log) {
   let changed = 0;
-  let rePrefixRemoved = 0;
+  let rePrefixNormalized = 0;
   let seenDate = false;
   let addressBlockOpen = false;
   const out = xml.replace(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g, (paragraph) => {
@@ -533,8 +547,14 @@ function normalizeTopAddressIndent(xml, log) {
     if (/^RE\s*:/i.test(text)) {
       addressBlockOpen = true;
       changed++;
-      rePrefixRemoved++;
-      return setParagraphIndent(removeRePrefixFromParagraph(paragraph), { left: '720', firstLine: '720' });
+      rePrefixNormalized++;
+      return setParagraphIndent(ensureRePrefixInParagraph(paragraph), { left: '720', firstLine: '720' });
+    }
+    if (!addressBlockOpen && /^[^\s].+?(?:Avenue|Street|Road|Boulevard|Place|Lane|Drive|Court|Terrace|Parkway|Highway|Way)\b/i.test(text)) {
+      addressBlockOpen = true;
+      changed++;
+      rePrefixNormalized++;
+      return setParagraphIndent(ensureRePrefixInParagraph(paragraph), { left: '720', firstLine: '720' });
     }
     if (addressBlockOpen && (/^[A-Za-z][A-Za-z .'-]+,\s*NY$/i.test(text) || /^Block\s*&\s*Lot\s*:/i.test(text))) {
       changed++;
@@ -546,14 +566,15 @@ function normalizeTopAddressIndent(xml, log) {
   if (changed) {
     const dlog = typeof log === 'function' ? log : (() => {});
     dlog(`[docx-presentation] Normalized indentation on ${changed} top address paragraph(s).`);
-    if (rePrefixRemoved) dlog(`[docx-presentation] Removed top-address RE prefix from ${rePrefixRemoved} paragraph(s).`);
+    if (rePrefixNormalized) dlog(`[docx-presentation] Normalized top-address RE prefix on ${rePrefixNormalized} paragraph(s).`);
   }
-  return { xml: out, changed, rePrefixRemoved };
+  return { xml: out, changed, rePrefixNormalized };
 }
 
 function removeHighlightMarkup(xml) {
   let removedHighlight = 0;
   let removedHighlightPairs = 0;
+  let removedYellowShading = 0;
   const out = String(xml || '')
     .replace(/<w:highlight\b[^>]*\/>/g, () => {
       removedHighlight++;
@@ -562,8 +583,21 @@ function removeHighlightMarkup(xml) {
     .replace(/<w:highlight\b[^>]*>[\s\S]*?<\/w:highlight>/g, () => {
       removedHighlightPairs++;
       return '';
+    })
+    .replace(/<w:shd\b[^>]*w:fill="(?:FFFF00|fff200|ffff66)"[^>]*\/>/gi, () => {
+      removedYellowShading++;
+      return '';
     });
-  return { xml: out, removedHighlight: removedHighlight + removedHighlightPairs };
+  return { xml: out, removedHighlight: removedHighlight + removedHighlightPairs + removedYellowShading };
+}
+
+function removeRedBodyColorMarkup(xml) {
+  let removed = 0;
+  const out = String(xml || '').replace(/<w:color\b[^>]*w:val="(?:FF0000|C00000|E00000|red)"[^>]*(?:\/>|>[\s\S]*?<\/w:color>)/gi, () => {
+    removed++;
+    return '';
+  });
+  return { xml: out, removed };
 }
 
 function applyFinalDocxPresentation(filePath, opts = {}) {
@@ -577,7 +611,8 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
     duplicateAggregateParagraphsRemoved: 0,
     projectDetailsBlankParagraphsRemoved: 0,
     addressIndentParagraphsChanged: 0,
-    topAddressRePrefixRemoved: 0,
+    topAddressRePrefixNormalized: 0,
+    removedRedColorTags: 0,
     removedHighlights: 0,
     touchedParts: []
   };
@@ -593,6 +628,15 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       xml = highlightResult.xml;
       if (highlightResult.removedHighlight) {
         result.removedHighlights += highlightResult.removedHighlight;
+        changed = true;
+      }
+    }
+
+    if (name === 'word/document.xml') {
+      const redResult = removeRedBodyColorMarkup(xml);
+      xml = redResult.xml;
+      if (redResult.removed) {
+        result.removedRedColorTags += redResult.removed;
         changed = true;
       }
     }
@@ -616,15 +660,16 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       result.duplicateAggregateParagraphsRemoved = duplicateResult.removed;
       if (duplicateResult.removed) changed = true;
 
-      const projectSpacingResult = removeBlankParagraphsBetweenAggregateAndAffordable(xml, log);
+      const projectSpacingResult = ensureBlankParagraphBetweenAggregateAndAffordable(xml, log);
       xml = projectSpacingResult.xml;
       result.projectDetailsBlankParagraphsRemoved = projectSpacingResult.removed;
-      if (projectSpacingResult.removed) changed = true;
+      result.projectDetailsBlankParagraphsInserted = projectSpacingResult.inserted;
+      if (projectSpacingResult.removed || projectSpacingResult.inserted) changed = true;
 
       const indentResult = normalizeTopAddressIndent(xml, log);
       xml = indentResult.xml;
       result.addressIndentParagraphsChanged = indentResult.changed;
-      result.topAddressRePrefixRemoved = indentResult.rePrefixRemoved || 0;
+      result.topAddressRePrefixNormalized = indentResult.rePrefixNormalized || 0;
       if (indentResult.changed) changed = true;
     }
 
@@ -656,6 +701,9 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
     log(`[docx-presentation] Removed ${result.removedHighlights} highlight tag(s) from generated letter.`);
   } else if (opts.removeHighlights !== false) {
     log('[docx-presentation] No highlight tags found to remove.');
+  }
+  if (result.removedRedColorTags) {
+    log(`[docx-presentation] Removed ${result.removedRedColorTags} red font-color tag(s) from generated letter body.`);
   }
   if (result.dateSpacing && result.dateSpacing.reason) {
     log(`[docx-presentation] Date spacing not changed: ${result.dateSpacing.reason}`);
