@@ -34,7 +34,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-07-14-docx-address-project-spacing-v1';
+const APP_VERSION = '2026-07-14-docx-safe-address-cleanup-v1';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';

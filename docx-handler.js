@@ -496,23 +496,26 @@ function setParagraphIndent(paragraphXml, attrs) {
     if (/<w:ind\b[^>]*(?:\/>|>[\s\S]*?<\/w:ind>)/.test(paragraphXml)) {
       return paragraphXml.replace(/<w:ind\b[^>]*(?:\/>|>[\s\S]*?<\/w:ind>)/, indTag);
     }
-    return paragraphXml.replace(/(<w:pPr\b[^>]*>)/, `$1${indTag}`);
+    return paragraphXml.replace(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/, (pPr) => {
+      const beforeThese = /<(?:w:contextualSpacing|w:mirrorIndents|w:suppressOverlap|w:jc|w:textDirection|w:textAlignment|w:textboxTightWrap|w:outlineLvl|w:divId|w:cnfStyle|w:rPr|w:sectPr|w:pPrChange)\b/;
+      const match = beforeThese.exec(pPr);
+      if (match) return pPr.slice(0, match.index) + indTag + pPr.slice(match.index);
+      return pPr.replace(/<\/w:pPr>\s*$/, `${indTag}</w:pPr>`);
+    });
   }
   return paragraphXml.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${indTag}</w:pPr>`);
 }
 
-function replaceParagraphText(paragraphXml, newText) {
+function removeRePrefixFromParagraph(paragraphXml) {
   let replaced = false;
-  const escaped = escapeXml(newText);
-  const out = paragraphXml.replace(/<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t>/g, (tag) => {
-    if (!replaced) {
-      replaced = true;
-      return `<w:t xml:space="preserve">${escaped}</w:t>`;
-    }
-    return tag.replace(/>[\s\S]*?</, '></');
+  return paragraphXml.replace(/(<w:t(?:\s[^>]*)?>)([\s\S]*?)(<\/w:t>)/g, (tag, open, text, close) => {
+    if (replaced) return tag;
+    const decoded = decodeXml(text);
+    const next = decoded.replace(/^RE\s*:\s*/i, '');
+    if (next === decoded) return tag;
+    replaced = true;
+    return `${open}${escapeXml(next)}${close}`;
   });
-  if (replaced) return out;
-  return paragraphXml.replace(/<\/w:p>\s*$/, `<w:r><w:t xml:space="preserve">${escaped}</w:t></w:r></w:p>`);
 }
 
 function normalizeTopAddressIndent(xml, log) {
@@ -531,8 +534,7 @@ function normalizeTopAddressIndent(xml, log) {
       addressBlockOpen = true;
       changed++;
       rePrefixRemoved++;
-      const withoutRe = text.replace(/^RE\s*:\s*/i, '');
-      return setParagraphIndent(replaceParagraphText(paragraph, withoutRe), { left: '720', firstLine: '720' });
+      return setParagraphIndent(removeRePrefixFromParagraph(paragraph), { left: '720', firstLine: '720' });
     }
     if (addressBlockOpen && (/^[A-Za-z][A-Za-z .'-]+,\s*NY$/i.test(text) || /^Block\s*&\s*Lot\s*:/i.test(text))) {
       changed++;
