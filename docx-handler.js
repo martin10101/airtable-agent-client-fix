@@ -666,49 +666,54 @@ function topAddressLayoutProfile(xml) {
   }
   if (addressIndex === -1) return null;
 
-  // Keep RE, borough, and Block & Lot on one common left edge. The address
-  // follows RE: inline with no tab or added spaces.
+  // Keep RE: as a label and align the street, borough, and Block & Lot in one
+  // address column. Positions are in twentieths of a point.
   return {
-    reIndent: { left: '720' },
-    detailIndent: { left: '720' }
+    reIndent: { left: '2160', hanging: '1440' },
+    detailIndent: { left: '2160' },
+    tabStop: '2160'
   };
 }
 
-function ensureReAddressInlineInParagraph(paragraphXml) {
+function setParagraphTabStop(paragraphXml, position) {
+  const tabsTag = `<w:tabs><w:tab w:val="left" w:pos="${String(position)}"/></w:tabs>`;
+  if (/<w:tabs\b/.test(paragraphXml)) {
+    return paragraphXml.replace(/<w:tabs\b[^>]*>[\s\S]*?<\/w:tabs>/, tabsTag);
+  }
+  if (/<w:pPr\b/.test(paragraphXml)) {
+    return paragraphXml.replace(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/, (pPr) => {
+      const beforeThese = /<(?:w:suppressAutoHyphens|w:kinsoku|w:wordWrap|w:overflowPunct|w:topLinePunct|w:autoSpaceDE|w:autoSpaceDN|w:bidi|w:adjustRightInd|w:snapToGrid|w:spacing|w:ind|w:contextualSpacing|w:mirrorIndents|w:suppressOverlap|w:jc|w:textDirection|w:textAlignment|w:textboxTightWrap|w:outlineLvl|w:divId|w:cnfStyle|w:rPr|w:sectPr|w:pPrChange)\b/;
+      const match = beforeThese.exec(pPr);
+      if (match) return pPr.slice(0, match.index) + tabsTag + pPr.slice(match.index);
+      return pPr.replace(/<\/w:pPr>\s*$/, `${tabsTag}</w:pPr>`);
+    });
+  }
+  return paragraphXml.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${tabsTag}</w:pPr>`);
+}
+
+function ensureReAddressTabInParagraph(paragraphXml) {
+  const paragraphBody = paragraphXml.replace(/<w:pPr\b[\s\S]*?<\/w:pPr>/, '');
+  const hasWordTab = /<w:tab\b/i.test(paragraphBody);
   let changed = false;
   let handled = false;
-  let addressStarted = false;
-  let out = paragraphXml.replace(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g, (tag, encodedText) => {
+  const out = paragraphXml.replace(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g, (tag, encodedText) => {
+    if (handled) return tag;
     const text = decodeXml(encodedText);
-    if (!handled) {
-      const match = text.match(/^\s*RE\s*:\s*(?:\\t\s*)?([\s\S]*)$/i);
-      if (!match) return tag;
-      handled = true;
-      const address = match[1].replace(/^\s+/, '');
-      addressStarted = !!address;
-      const normalized = `RE:${address}`;
+    const match = text.match(/^\s*RE\s*:\s*(?:\\t\s*)?([\s\S]*)$/i);
+    if (!match) return tag;
+    handled = true;
+    const address = match[1].replace(/^\s+/, '');
+    if (hasWordTab) {
+      const normalized = address ? `RE:${address}` : 'RE:';
       if (normalized === text) return tag;
       changed = true;
       return `<w:t>${escapeXml(normalized)}</w:t>`;
     }
-    if (addressStarted) return tag;
-    const normalized = text.replace(/^\s*(?:\\t\s*)?/, '');
-    if (!normalized) return tag;
-    addressStarted = true;
-    if (normalized === text) return tag;
     changed = true;
-    return `<w:t>${escapeXml(normalized)}</w:t>`;
+    const addressXml = address ? `<w:t xml:space="preserve">${escapeXml(address)}</w:t>` : '';
+    return `<w:t>RE:</w:t><w:tab/>${addressXml}`;
   });
   if (!handled) return { paragraphXml, changed: false };
-
-  const withoutTabStops = out.replace(/<w:tabs\b[^>]*>[\s\S]*?<\/w:tabs>/g, () => {
-    changed = true;
-    return '';
-  });
-  out = withoutTabStops.replace(/<w:tab\b[^>]*\/>/g, () => {
-    changed = true;
-    return '';
-  });
   return { paragraphXml: out, changed };
 }
 
@@ -732,8 +737,9 @@ function normalizeTopAddressIndent(xml, log, profile) {
   let tabNormalized = 0;
   let seenDate = false;
   let addressBlockOpen = false;
-  const reIndent = profile && profile.reIndent ? profile.reIndent : { left: '720' };
-  const detailIndent = profile && profile.detailIndent ? profile.detailIndent : { left: '720' };
+  const reIndent = profile && profile.reIndent ? profile.reIndent : { left: '2160', hanging: '1440' };
+  const detailIndent = profile && profile.detailIndent ? profile.detailIndent : { left: '2160' };
+  const tabStop = profile && profile.tabStop ? profile.tabStop : '2160';
   const out = xml.replace(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g, (paragraph) => {
     const text = extractParagraphText(paragraph).replace(/\s+/g, ' ').trim();
     if (!seenDate && looksLikeLetterDate(text)) {
@@ -745,17 +751,17 @@ function normalizeTopAddressIndent(xml, log, profile) {
       addressBlockOpen = true;
       changed++;
       rePrefixNormalized++;
-      const inlineResult = ensureReAddressInlineInParagraph(ensureRePrefixInParagraph(paragraph));
-      if (inlineResult.changed) tabNormalized++;
-      return setParagraphIndent(inlineResult.paragraphXml, reIndent);
+      const tabResult = ensureReAddressTabInParagraph(ensureRePrefixInParagraph(paragraph));
+      if (tabResult.changed) tabNormalized++;
+      return setParagraphTabStop(setParagraphIndent(tabResult.paragraphXml, reIndent), tabStop);
     }
     if (!addressBlockOpen && /^[^\s].+?(?:Avenue|Street|Road|Boulevard|Place|Lane|Drive|Court|Terrace|Parkway|Highway|Way)\b/i.test(text)) {
       addressBlockOpen = true;
       changed++;
       rePrefixNormalized++;
-      const inlineResult = ensureReAddressInlineInParagraph(ensureRePrefixInParagraph(paragraph));
-      if (inlineResult.changed) tabNormalized++;
-      return setParagraphIndent(inlineResult.paragraphXml, reIndent);
+      const tabResult = ensureReAddressTabInParagraph(ensureRePrefixInParagraph(paragraph));
+      if (tabResult.changed) tabNormalized++;
+      return setParagraphTabStop(setParagraphIndent(tabResult.paragraphXml, reIndent), tabStop);
     }
     if (addressBlockOpen && (/^[A-Za-z][A-Za-z .'-]+,\s*NY$/i.test(text) || /^Block\s*&\s*Lot\s*:/i.test(text))) {
       changed++;
@@ -768,7 +774,7 @@ function normalizeTopAddressIndent(xml, log, profile) {
     const dlog = typeof log === 'function' ? log : (() => {});
     dlog(`[docx-presentation] Normalized indentation on ${changed} top address paragraph(s).`);
     if (rePrefixNormalized) dlog(`[docx-presentation] Normalized top-address RE prefix on ${rePrefixNormalized} paragraph(s).`);
-    if (tabNormalized) dlog(`[docx-presentation] Removed tab/space separators after RE: in ${tabNormalized} top-address paragraph(s).`);
+    if (tabNormalized) dlog(`[docx-presentation] Replaced ${tabNormalized} top-address text separator(s) with a real Word tab.`);
   }
   return { xml: out, changed, rePrefixNormalized, tabNormalized };
 }

@@ -34,7 +34,7 @@ const pdfHandler = require('./pdf-handler');
 const projectRules = require('./project-rules');
 const { findFolderForTips } = require('./find-tip-folder');
 
-const APP_VERSION = '2026-07-20-inline-re-address-v3';
+const APP_VERSION = '2026-07-20-client-layout-v4';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const TEMPLATE_FIELD = process.env.TEMPLATE_FIELD || 'Template Attachment';
 const TEMPLATE_SELECT_FIELD = process.env.TEMPLATE_SELECT_FIELD || 'Template';
@@ -923,7 +923,7 @@ app.post('/generate', async (req, res) => {
 
     if (ext === '.docx') {
       finalDocxPresentation = docxHandler.applyFinalDocxPresentation(outputPath, {
-        blankLinesAfterDate: 5,
+        blankLinesAfterDate: 7,
         sourceTemplatePath: templatePath,
         removeHighlights: true,
         log
