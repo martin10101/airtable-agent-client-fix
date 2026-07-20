@@ -542,6 +542,39 @@ function ensureBlankParagraphsAfterDate(xml, count, log) {
   return { xml, inserted: 0, dateText: null, reason: 'date paragraph not found near top of document' };
 }
 
+function ensureBlankParagraphsBeforeDate(xml, count, log) {
+  const wanted = Math.max(0, Number(count) || 0);
+  const paragraphs = collectParagraphXml(xml);
+  const maxSearch = Math.min(paragraphs.length, 40);
+  for (let index = 0; index < maxSearch; index++) {
+    const date = paragraphs[index];
+    if (!looksLikeLetterDate(date.text)) continue;
+    let existingBlank = 0;
+    let previous = index - 1;
+    while (previous >= 0 && !paragraphs[previous].text) {
+      existingBlank++;
+      previous--;
+    }
+    const missing = Math.max(0, wanted - existingBlank);
+    const extra = Math.max(0, existingBlank - wanted);
+    let out = xml;
+    if (extra) {
+      const removeStart = paragraphs[index - existingBlank].start;
+      const removeEnd = paragraphs[index - wanted - 1].end;
+      out = xml.slice(0, removeStart) + xml.slice(removeEnd);
+    } else if (missing) {
+      const blankSource = existingBlank ? paragraphs[index - 1].xml : date.xml;
+      const blanks = Array.from({ length: missing }, () => blankParagraphLike(blankSource)).join('');
+      out = xml.slice(0, date.start) + blanks + xml.slice(date.start);
+    }
+    const dlog = typeof log === 'function' ? log : (() => {});
+    if (missing) dlog(`[docx-presentation] Added ${missing} blank paragraph(s) before date "${date.text}" (${existingBlank} already present).`);
+    if (extra) dlog(`[docx-presentation] Removed ${extra} extra blank paragraph(s) before date "${date.text}" (${existingBlank} were present).`);
+    return { xml: out, inserted: missing, removed: extra, dateText: date.text, existingBlank };
+  }
+  return { xml, inserted: 0, removed: 0, dateText: null, reason: 'date paragraph not found near top of document' };
+}
+
 function ensureBlankParagraphsAfterFirstMatch(xml, predicate, count, label, log) {
   const wanted = Number(count) || 0;
   const paragraphs = collectParagraphXml(xml);
@@ -633,6 +666,31 @@ function ensureBlankParagraphBetweenAggregateAndAffordable(xml, log) {
   return { xml, inserted: 0, removed: 0, finalBlankCount: null };
 }
 
+function removeBlankParagraphsBeforePostCompletion(xml, log) {
+  const paragraphs = collectParagraphXml(xml);
+  const postIndex = paragraphs.findIndex((paragraph) =>
+    /^Post-Completion Projected Assessed Value and Tax Liability/i.test(paragraph.text)
+  );
+  if (postIndex <= 0) return { xml, removed: 0, reason: 'Post-Completion heading not found' };
+
+  let previousTextIndex = postIndex - 1;
+  while (previousTextIndex >= 0 && !paragraphs[previousTextIndex].text) previousTextIndex--;
+  if (previousTextIndex < 0 || !/^(We believe|We anticipate)\b/i.test(paragraphs[previousTextIndex].text)) {
+    return { xml, removed: 0, reason: 'phase-in paragraph not found immediately before Post-Completion heading' };
+  }
+
+  const between = paragraphs.slice(previousTextIndex + 1, postIndex);
+  if (!between.length) return { xml, removed: 0 };
+  if (!between.every((paragraph) => isEmptyParagraph(paragraph.xml))) {
+    return { xml, removed: 0, reason: 'non-empty content exists before Post-Completion heading' };
+  }
+
+  const out = xml.slice(0, between[0].start) + xml.slice(between[between.length - 1].end);
+  const dlog = typeof log === 'function' ? log : (() => {});
+  dlog(`[docx-layout] Removed ${between.length} extra blank paragraph(s) before Post-Completion heading; retained the heading's own spacing.`);
+  return { xml: out, removed: between.length };
+}
+
 function setParagraphIndent(paragraphXml, attrs) {
   const attrText = Object.entries(attrs)
     .map(([key, value]) => `w:${key}="${String(value)}"`)
@@ -669,7 +727,7 @@ function topAddressLayoutProfile(xml) {
   // Keep RE: as a label and align the street, borough, and Block & Lot in one
   // address column. Positions are in twentieths of a point.
   return {
-    reIndent: { left: '2160', hanging: '1440' },
+    reIndent: { left: '2160', hanging: '1080' },
     detailIndent: { left: '2160' },
     tabStop: '2160'
   };
@@ -737,7 +795,7 @@ function normalizeTopAddressIndent(xml, log, profile) {
   let tabNormalized = 0;
   let seenDate = false;
   let addressBlockOpen = false;
-  const reIndent = profile && profile.reIndent ? profile.reIndent : { left: '2160', hanging: '1440' };
+  const reIndent = profile && profile.reIndent ? profile.reIndent : { left: '2160', hanging: '1080' };
   const detailIndent = profile && profile.detailIndent ? profile.detailIndent : { left: '2160' };
   const tabStop = profile && profile.tabStop ? profile.tabStop : '2160';
   const out = xml.replace(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g, (paragraph) => {
@@ -836,14 +894,20 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
   const propertySummaryBlankCount = opts.blankLinesAfterPropertySummary == null
     ? (sourcePropertySummarySpacing ? sourcePropertySummarySpacing.blankParagraphCount : null)
     : Number(opts.blankLinesAfterPropertySummary);
+  const blankLinesBeforeDate = opts.blankLinesBeforeDate == null
+    ? null
+    : Math.max(0, Number(opts.blankLinesBeforeDate) || 0);
   const result = {
+    blankLinesBeforeDate,
     blankLinesAfterDate: Number(opts.blankLinesAfterDate) || 0,
     blankLinesAfterPropertySummary: propertySummaryBlankCount,
+    beforeDateSpacing: null,
     dateSpacing: null,
     propertySummarySpacing: null,
     sourceTemplateSpacingUsed: !!opts.sourceTemplatePath,
     projectDetailsSpacing: null,
     duplicateAggregateParagraphsRemoved: 0,
+    valuationBlankParagraphsRemoved: 0,
     projectDetailsBlankParagraphsRemoved: 0,
     addressIndentParagraphsChanged: 0,
     topAddressRePrefixNormalized: 0,
@@ -890,6 +954,19 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       if (spacingResult.inserted || spacingResult.removed) changed = true;
     }
 
+    if (name === 'word/document.xml' && result.blankLinesBeforeDate != null) {
+      const beforeDateResult = ensureBlankParagraphsBeforeDate(xml, result.blankLinesBeforeDate, log);
+      xml = beforeDateResult.xml;
+      result.beforeDateSpacing = {
+        inserted: beforeDateResult.inserted,
+        removed: beforeDateResult.removed || 0,
+        dateText: beforeDateResult.dateText,
+        existingBlank: beforeDateResult.existingBlank || 0,
+        reason: beforeDateResult.reason || null
+      };
+      if (beforeDateResult.inserted || beforeDateResult.removed) changed = true;
+    }
+
     if (name === 'word/document.xml') {
       const duplicateResult = removeDuplicateAggregateParagraphs(xml, log);
       xml = duplicateResult.xml;
@@ -902,6 +979,11 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       result.projectDetailsBlankParagraphsRemoved = projectSpacingResult.removed || 0;
       result.projectDetailsBlankParagraphsInserted = projectSpacingResult.inserted || 0;
       if (projectSpacingResult.changedPairs) changed = true;
+
+      const valuationSpacingResult = removeBlankParagraphsBeforePostCompletion(xml, log);
+      xml = valuationSpacingResult.xml;
+      result.valuationBlankParagraphsRemoved = valuationSpacingResult.removed || 0;
+      if (valuationSpacingResult.removed) changed = true;
 
       const indentResult = normalizeTopAddressIndent(xml, log, sourceAddressLayout);
       xml = indentResult.xml;
@@ -945,6 +1027,9 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
   }
   if (result.dateSpacing && result.dateSpacing.reason) {
     log(`[docx-presentation] Date spacing not changed: ${result.dateSpacing.reason}`);
+  }
+  if (result.beforeDateSpacing && result.beforeDateSpacing.reason) {
+    log(`[docx-presentation] Before-date spacing not changed: ${result.beforeDateSpacing.reason}`);
   }
 
   fs.writeFileSync(filePath, zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' }));
