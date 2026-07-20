@@ -652,6 +652,71 @@ function setParagraphIndent(paragraphXml, attrs) {
   return paragraphXml.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${indTag}</w:pPr>`);
 }
 
+function topAddressLayoutProfile(xml) {
+  const paragraphs = collectParagraphXml(xml);
+  const dateIndex = paragraphs.findIndex((paragraph, index) => index < 40 && looksLikeLetterDate(paragraph.text));
+  const start = dateIndex === -1 ? 0 : dateIndex + 1;
+  let addressIndex = -1;
+  for (let index = start; index < Math.min(paragraphs.length, start + 30); index++) {
+    const text = paragraphs[index].text;
+    if (/^RE\s*:/i.test(text) || /^[^\s].+?(?:Avenue|Street|Road|Boulevard|Place|Lane|Drive|Court|Terrace|Parkway|Highway|Way)\b/i.test(text)) {
+      addressIndex = index;
+      break;
+    }
+  }
+  if (addressIndex === -1) return null;
+
+  // A fixed hanging layout avoids Word's default-tab behavior changing from
+  // one template to another. Positions are in twentieths of a point.
+  return {
+    reIndent: { left: '2160', hanging: '1440' },
+    detailIndent: { left: '2160' },
+    tabStop: '2160'
+  };
+}
+
+function setParagraphTabStop(paragraphXml, position) {
+  const tabsTag = `<w:tabs><w:tab w:val="left" w:pos="${String(position)}"/></w:tabs>`;
+  if (/<w:tabs\b/.test(paragraphXml)) {
+    return paragraphXml.replace(/<w:tabs\b[^>]*>[\s\S]*?<\/w:tabs>/, tabsTag);
+  }
+  if (/<w:pPr\b/.test(paragraphXml)) {
+    return paragraphXml.replace(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/, (pPr) => {
+      const beforeThese = /<(?:w:suppressAutoHyphens|w:kinsoku|w:wordWrap|w:overflowPunct|w:topLinePunct|w:autoSpaceDE|w:autoSpaceDN|w:bidi|w:adjustRightInd|w:snapToGrid|w:spacing|w:ind|w:contextualSpacing|w:mirrorIndents|w:suppressOverlap|w:jc|w:textDirection|w:textAlignment|w:textboxTightWrap|w:outlineLvl|w:divId|w:cnfStyle|w:rPr|w:sectPr|w:pPrChange)\b/;
+      const match = beforeThese.exec(pPr);
+      if (match) return pPr.slice(0, match.index) + tabsTag + pPr.slice(match.index);
+      return pPr.replace(/<\/w:pPr>\s*$/, `${tabsTag}</w:pPr>`);
+    });
+  }
+  return paragraphXml.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${tabsTag}</w:pPr>`);
+}
+
+function ensureReAddressTabInParagraph(paragraphXml) {
+  const paragraphBody = paragraphXml.replace(/<w:pPr\b[\s\S]*?<\/w:pPr>/, '');
+  const hasWordTab = /<w:tab\b/i.test(paragraphBody);
+  let changed = false;
+  let handled = false;
+  const out = paragraphXml.replace(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g, (tag, encodedText) => {
+    if (handled) return tag;
+    const text = decodeXml(encodedText);
+    const match = text.match(/^\s*RE\s*:\s*(?:\\t\s*)?([\s\S]*)$/i);
+    if (!match) return tag;
+    handled = true;
+    const address = match[1].replace(/^\s+/, '');
+    if (hasWordTab) {
+      const normalized = address ? `RE:${address}` : 'RE:';
+      if (normalized === text) return tag;
+      changed = true;
+      return `<w:t>${escapeXml(normalized)}</w:t>`;
+    }
+    changed = true;
+    const addressXml = address ? `<w:t xml:space="preserve">${escapeXml(address)}</w:t>` : '';
+    return `<w:t>RE:</w:t><w:tab/>${addressXml}`;
+  });
+  if (!handled) return { paragraphXml, changed: false };
+  return { paragraphXml: out, changed };
+}
+
 function ensureRePrefixInParagraph(paragraphXml) {
   let replaced = false;
   return paragraphXml.replace(/(<w:t(?:\s[^>]*)?>)([\s\S]*?)(<\/w:t>)/g, (tag, open, text, close) => {
@@ -666,11 +731,15 @@ function ensureRePrefixInParagraph(paragraphXml) {
   });
 }
 
-function normalizeTopAddressIndent(xml, log) {
+function normalizeTopAddressIndent(xml, log, profile) {
   let changed = 0;
   let rePrefixNormalized = 0;
+  let tabNormalized = 0;
   let seenDate = false;
   let addressBlockOpen = false;
+  const reIndent = profile && profile.reIndent ? profile.reIndent : { left: '2160', hanging: '1440' };
+  const detailIndent = profile && profile.detailIndent ? profile.detailIndent : { left: '2160' };
+  const tabStop = profile && profile.tabStop ? profile.tabStop : '2160';
   const out = xml.replace(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g, (paragraph) => {
     const text = extractParagraphText(paragraph).replace(/\s+/g, ' ').trim();
     if (!seenDate && looksLikeLetterDate(text)) {
@@ -682,17 +751,21 @@ function normalizeTopAddressIndent(xml, log) {
       addressBlockOpen = true;
       changed++;
       rePrefixNormalized++;
-      return setParagraphIndent(ensureRePrefixInParagraph(paragraph), { left: '720', firstLine: '720' });
+      const tabResult = ensureReAddressTabInParagraph(ensureRePrefixInParagraph(paragraph));
+      if (tabResult.changed) tabNormalized++;
+      return setParagraphTabStop(setParagraphIndent(tabResult.paragraphXml, reIndent), tabStop);
     }
     if (!addressBlockOpen && /^[^\s].+?(?:Avenue|Street|Road|Boulevard|Place|Lane|Drive|Court|Terrace|Parkway|Highway|Way)\b/i.test(text)) {
       addressBlockOpen = true;
       changed++;
       rePrefixNormalized++;
-      return setParagraphIndent(ensureRePrefixInParagraph(paragraph), { left: '720', firstLine: '720' });
+      const tabResult = ensureReAddressTabInParagraph(ensureRePrefixInParagraph(paragraph));
+      if (tabResult.changed) tabNormalized++;
+      return setParagraphTabStop(setParagraphIndent(tabResult.paragraphXml, reIndent), tabStop);
     }
     if (addressBlockOpen && (/^[A-Za-z][A-Za-z .'-]+,\s*NY$/i.test(text) || /^Block\s*&\s*Lot\s*:/i.test(text))) {
       changed++;
-      return setParagraphIndent(paragraph, { left: '720', firstLine: '720' });
+      return setParagraphIndent(paragraph, detailIndent);
     }
     if (addressBlockOpen && text) addressBlockOpen = false;
     return paragraph;
@@ -701,8 +774,9 @@ function normalizeTopAddressIndent(xml, log) {
     const dlog = typeof log === 'function' ? log : (() => {});
     dlog(`[docx-presentation] Normalized indentation on ${changed} top address paragraph(s).`);
     if (rePrefixNormalized) dlog(`[docx-presentation] Normalized top-address RE prefix on ${rePrefixNormalized} paragraph(s).`);
+    if (tabNormalized) dlog(`[docx-presentation] Replaced ${tabNormalized} top-address text separator(s) with a real Word tab.`);
   }
-  return { xml: out, changed, rePrefixNormalized };
+  return { xml: out, changed, rePrefixNormalized, tabNormalized };
 }
 
 function removeHighlightMarkup(xml) {
@@ -739,6 +813,7 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
   const zip = new PizZip(fs.readFileSync(filePath));
   let sourceProjectDetailsSpacing = null;
   let sourcePropertySummarySpacing = null;
+  let sourceAddressLayout = null;
   if (opts.sourceTemplatePath) {
     try {
       const sourceZip = new PizZip(fs.readFileSync(opts.sourceTemplatePath));
@@ -750,7 +825,9 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
           sourceXml,
           (text) => /^Property Summary\s*:/i.test(text)
         );
+        sourceAddressLayout = topAddressLayoutProfile(sourceXml);
         log(`[docx-layout] Source template spacing profile: Project Details=${sourceProjectDetailsSpacing ? sourceProjectDetailsSpacing.blankParagraphCount : 'not found'} blank paragraph(s); Property Summary=${sourcePropertySummarySpacing ? sourcePropertySummarySpacing.blankParagraphCount : 'not found'} blank paragraph(s).`);
+        log(`[docx-layout] Source template address profile: RE indent=${JSON.stringify(sourceAddressLayout && sourceAddressLayout.reIndent)}; detail indent=${JSON.stringify(sourceAddressLayout && sourceAddressLayout.detailIndent)}.`);
       }
     } catch (error) {
       log(`[WARN] Could not read source-template spacing profile: ${error.message}`);
@@ -770,6 +847,7 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
     projectDetailsBlankParagraphsRemoved: 0,
     addressIndentParagraphsChanged: 0,
     topAddressRePrefixNormalized: 0,
+    topAddressTabsNormalized: 0,
     removedRedColorTags: 0,
     removedHighlights: 0,
     touchedParts: []
@@ -825,10 +903,11 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       result.projectDetailsBlankParagraphsInserted = projectSpacingResult.inserted || 0;
       if (projectSpacingResult.changedPairs) changed = true;
 
-      const indentResult = normalizeTopAddressIndent(xml, log);
+      const indentResult = normalizeTopAddressIndent(xml, log, sourceAddressLayout);
       xml = indentResult.xml;
       result.addressIndentParagraphsChanged = indentResult.changed;
       result.topAddressRePrefixNormalized = indentResult.rePrefixNormalized || 0;
+      result.topAddressTabsNormalized = indentResult.tabNormalized || 0;
       if (indentResult.changed) changed = true;
     }
 
