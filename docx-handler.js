@@ -374,6 +374,140 @@ function blankParagraphLike(paragraphXml) {
   return `${open}${paragraphPropertiesFromXml(paragraphXml)}<w:r><w:t></w:t></w:r></w:p>`;
 }
 
+function paragraphHasNumbering(paragraphXml) {
+  return /<w:numPr\b/i.test(String(paragraphXml || ''));
+}
+
+function modeNumber(values, fallback) {
+  if (!values.length) return fallback;
+  const counts = new Map();
+  let best = values[0];
+  let bestCount = 0;
+  for (const value of values) {
+    const count = (counts.get(value) || 0) + 1;
+    counts.set(value, count);
+    if (count > bestCount) {
+      best = value;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+function projectDetailsNumberedParagraphs(xml) {
+  const paragraphs = collectParagraphXml(xml);
+  const headingIndex = paragraphs.findIndex((paragraph) => /^Project Details$/i.test(paragraph.text));
+  if (headingIndex === -1) return { paragraphs, headingIndex, numbered: [] };
+
+  const numbered = [];
+  let listStarted = false;
+  for (let index = headingIndex + 1; index < paragraphs.length; index++) {
+    const paragraph = paragraphs[index];
+    if (paragraphHasNumbering(paragraph.xml) && paragraph.text) {
+      listStarted = true;
+      numbered.push({ ...paragraph, index });
+      continue;
+    }
+    if (!listStarted || !paragraph.text) continue;
+    break;
+  }
+  return { paragraphs, headingIndex, numbered };
+}
+
+function projectDetailsSpacingProfile(xml) {
+  const section = projectDetailsNumberedParagraphs(xml);
+  if (section.numbered.length < 2) return null;
+  const blankCounts = [];
+  let separatorParagraph = null;
+
+  for (let index = 0; index < section.numbered.length - 1; index++) {
+    const current = section.numbered[index];
+    const next = section.numbered[index + 1];
+    const between = section.paragraphs.slice(current.index + 1, next.index);
+    if (!between.every((paragraph) => isEmptyParagraph(paragraph.xml))) continue;
+    blankCounts.push(between.length);
+    if (!separatorParagraph && between.length) separatorParagraph = between[0].xml;
+  }
+
+  if (!blankCounts.length) return null;
+  return {
+    blankParagraphCount: modeNumber(blankCounts, blankCounts[0]),
+    separatorParagraph
+  };
+}
+
+function blankSpacingProfileAfter(xml, predicate) {
+  const paragraphs = collectParagraphXml(xml);
+  const index = paragraphs.findIndex((paragraph, paragraphIndex) => predicate(paragraph.text, paragraphIndex));
+  if (index === -1) return null;
+  const blanks = [];
+  for (let next = index + 1; next < paragraphs.length; next++) {
+    if (!isEmptyParagraph(paragraphs[next].xml)) break;
+    blanks.push(paragraphs[next].xml);
+  }
+  return {
+    blankParagraphCount: blanks.length,
+    separatorParagraph: blanks[0] || null
+  };
+}
+
+function cleanTemplateBlankParagraph(paragraphXml) {
+  if (!paragraphXml) return '';
+  let cleaned = blankParagraphLike(paragraphXml);
+  cleaned = removeHighlightMarkup(cleaned).xml;
+  cleaned = removeRedBodyColorMarkup(cleaned).xml;
+  return cleaned;
+}
+
+function normalizeProjectDetailsSpacing(xml, profile, log) {
+  if (!profile || profile.blankParagraphCount == null) {
+    return { xml, changedPairs: 0, inserted: 0, removed: 0, skippedPairs: 0, desiredBlankCount: null };
+  }
+  const section = projectDetailsNumberedParagraphs(xml);
+  if (section.numbered.length < 2) {
+    return { xml, changedPairs: 0, inserted: 0, removed: 0, skippedPairs: 0, desiredBlankCount: profile.blankParagraphCount };
+  }
+
+  const desired = Math.max(0, Number(profile.blankParagraphCount) || 0);
+  const separator = cleanTemplateBlankParagraph(profile.separatorParagraph);
+  const replacements = [];
+  let inserted = 0;
+  let removed = 0;
+  let skippedPairs = 0;
+
+  for (let index = 0; index < section.numbered.length - 1; index++) {
+    const current = section.numbered[index];
+    const next = section.numbered[index + 1];
+    const between = section.paragraphs.slice(current.index + 1, next.index);
+    if (!between.every((paragraph) => isEmptyParagraph(paragraph.xml))) {
+      skippedPairs++;
+      continue;
+    }
+    if (between.length === desired) continue;
+    const replacement = desired > 0 && separator ? separator.repeat(desired) : '';
+    replacements.push({ start: current.end, end: next.start, replacement });
+    inserted += Math.max(0, desired - between.length);
+    removed += Math.max(0, between.length - desired);
+  }
+
+  let out = xml;
+  for (const replacement of replacements.reverse()) {
+    out = out.slice(0, replacement.start) + replacement.replacement + out.slice(replacement.end);
+  }
+  if (replacements.length) {
+    const dlog = typeof log === 'function' ? log : (() => {});
+    dlog(`[docx-layout] Matched Project Details spacing to source template for ${replacements.length} item pair(s): blank paragraphs=${desired}, inserted=${inserted}, removed=${removed}.`);
+  }
+  return {
+    xml: out,
+    changedPairs: replacements.length,
+    inserted,
+    removed,
+    skippedPairs,
+    desiredBlankCount: desired
+  };
+}
+
 function ensureBlankParagraphsAfterDate(xml, count, log) {
   const wanted = Number(count) || 0;
   if (wanted <= 0) return { xml, inserted: 0, dateText: null, reason: 'disabled' };
@@ -603,11 +737,35 @@ function removeRedBodyColorMarkup(xml) {
 function applyFinalDocxPresentation(filePath, opts = {}) {
   const log = typeof opts.log === 'function' ? opts.log : (() => {});
   const zip = new PizZip(fs.readFileSync(filePath));
+  let sourceProjectDetailsSpacing = null;
+  let sourcePropertySummarySpacing = null;
+  if (opts.sourceTemplatePath) {
+    try {
+      const sourceZip = new PizZip(fs.readFileSync(opts.sourceTemplatePath));
+      const sourceDocument = sourceZip.file('word/document.xml');
+      if (sourceDocument) {
+        const sourceXml = sourceDocument.asText();
+        sourceProjectDetailsSpacing = projectDetailsSpacingProfile(sourceXml);
+        sourcePropertySummarySpacing = blankSpacingProfileAfter(
+          sourceXml,
+          (text) => /^Property Summary\s*:/i.test(text)
+        );
+        log(`[docx-layout] Source template spacing profile: Project Details=${sourceProjectDetailsSpacing ? sourceProjectDetailsSpacing.blankParagraphCount : 'not found'} blank paragraph(s); Property Summary=${sourcePropertySummarySpacing ? sourcePropertySummarySpacing.blankParagraphCount : 'not found'} blank paragraph(s).`);
+      }
+    } catch (error) {
+      log(`[WARN] Could not read source-template spacing profile: ${error.message}`);
+    }
+  }
+  const propertySummaryBlankCount = opts.blankLinesAfterPropertySummary == null
+    ? (sourcePropertySummarySpacing ? sourcePropertySummarySpacing.blankParagraphCount : null)
+    : Number(opts.blankLinesAfterPropertySummary);
   const result = {
     blankLinesAfterDate: Number(opts.blankLinesAfterDate) || 0,
-    blankLinesAfterPropertySummary: opts.blankLinesAfterPropertySummary == null ? null : Number(opts.blankLinesAfterPropertySummary),
+    blankLinesAfterPropertySummary: propertySummaryBlankCount,
     dateSpacing: null,
     propertySummarySpacing: null,
+    sourceTemplateSpacingUsed: !!opts.sourceTemplatePath,
+    projectDetailsSpacing: null,
     duplicateAggregateParagraphsRemoved: 0,
     projectDetailsBlankParagraphsRemoved: 0,
     addressIndentParagraphsChanged: 0,
@@ -660,11 +818,12 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       result.duplicateAggregateParagraphsRemoved = duplicateResult.removed;
       if (duplicateResult.removed) changed = true;
 
-      const projectSpacingResult = ensureBlankParagraphBetweenAggregateAndAffordable(xml, log);
+      const projectSpacingResult = normalizeProjectDetailsSpacing(xml, sourceProjectDetailsSpacing, log);
       xml = projectSpacingResult.xml;
-      result.projectDetailsBlankParagraphsRemoved = projectSpacingResult.removed;
-      result.projectDetailsBlankParagraphsInserted = projectSpacingResult.inserted;
-      if (projectSpacingResult.removed || projectSpacingResult.inserted) changed = true;
+      result.projectDetailsSpacing = projectSpacingResult;
+      result.projectDetailsBlankParagraphsRemoved = projectSpacingResult.removed || 0;
+      result.projectDetailsBlankParagraphsInserted = projectSpacingResult.inserted || 0;
+      if (projectSpacingResult.changedPairs) changed = true;
 
       const indentResult = normalizeTopAddressIndent(xml, log);
       xml = indentResult.xml;
@@ -673,11 +832,11 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       if (indentResult.changed) changed = true;
     }
 
-    if (name === 'word/document.xml' && result.blankLinesAfterPropertySummary != null) {
+    if (name === 'word/document.xml' && propertySummaryBlankCount != null) {
       const summarySpacing = ensureBlankParagraphsAfterFirstMatch(
         xml,
         (text) => /^Property Summary\s*:/i.test(text),
-        result.blankLinesAfterPropertySummary,
+        propertySummaryBlankCount,
         'Property Summary',
         log
       );
