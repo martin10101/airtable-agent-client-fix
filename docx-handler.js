@@ -692,29 +692,38 @@ function ensureBlankParagraphBetweenAggregateAndAffordable(xml, log) {
   return { xml, inserted: 0, removed: 0, finalBlankCount: null };
 }
 
-function removeBlankParagraphsBeforePostCompletion(xml, log) {
+function normalizeBlankParagraphBeforePostCompletion(xml, log) {
   const paragraphs = collectParagraphXml(xml);
   const postIndex = paragraphs.findIndex((paragraph) =>
     /^Post-Completion Projected Assessed Value and Tax Liability/i.test(paragraph.text)
   );
-  if (postIndex <= 0) return { xml, removed: 0, reason: 'Post-Completion heading not found' };
+  if (postIndex <= 0) return { xml, inserted: 0, removed: 0, reason: 'Post-Completion heading not found' };
 
   let previousTextIndex = postIndex - 1;
   while (previousTextIndex >= 0 && !paragraphs[previousTextIndex].text) previousTextIndex--;
   if (previousTextIndex < 0 || !/^(We believe|We anticipate)\b/i.test(paragraphs[previousTextIndex].text)) {
-    return { xml, removed: 0, reason: 'phase-in paragraph not found immediately before Post-Completion heading' };
+    return { xml, inserted: 0, removed: 0, reason: 'phase-in paragraph not found immediately before Post-Completion heading' };
   }
 
   const between = paragraphs.slice(previousTextIndex + 1, postIndex);
-  if (!between.length) return { xml, removed: 0 };
   if (!between.every((paragraph) => isEmptyParagraph(paragraph.xml))) {
-    return { xml, removed: 0, reason: 'non-empty content exists before Post-Completion heading' };
+    return { xml, inserted: 0, removed: 0, reason: 'non-empty content exists before Post-Completion heading' };
   }
 
-  const out = xml.slice(0, between[0].start) + xml.slice(between[between.length - 1].end);
   const dlog = typeof log === 'function' ? log : (() => {});
-  dlog(`[docx-layout] Removed ${between.length} extra blank paragraph(s) before Post-Completion heading; retained the heading's own spacing.`);
-  return { xml: out, removed: between.length };
+  if (!between.length) {
+    const blank = '<w:p><w:r><w:t></w:t></w:r></w:p>';
+    const out = xml.slice(0, paragraphs[postIndex].start) + blank + xml.slice(paragraphs[postIndex].start);
+    dlog('[docx-layout] Added 1 blank paragraph before Post-Completion heading.');
+    return { xml: out, inserted: 1, removed: 0, finalBlankCount: 1 };
+  }
+  if (between.length === 1) {
+    return { xml, inserted: 0, removed: 0, finalBlankCount: 1 };
+  }
+
+  const out = xml.slice(0, between[1].start) + xml.slice(between[between.length - 1].end);
+  dlog(`[docx-layout] Reduced ${between.length} blank paragraphs to 1 before Post-Completion heading.`);
+  return { xml: out, inserted: 0, removed: between.length - 1, finalBlankCount: 1 };
 }
 
 function normalizeLetterBodyBlankParagraphs(xml, log) {
@@ -1217,6 +1226,7 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
     projectDetailsRePrefixesRepaired: 0,
     projectDetailsRePrefixDetails: [],
     valuationBlankParagraphsRemoved: 0,
+    valuationBlankParagraphsInserted: 0,
     projectDetailsBlankParagraphsRemoved: 0,
     addressIndentParagraphsChanged: 0,
     topAddressRePrefixNormalized: 0,
@@ -1309,10 +1319,11 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       result.bodySpacingReason = bodySpacingResult.reason || null;
       if (bodySpacingResult.removed) changed = true;
 
-      const valuationSpacingResult = removeBlankParagraphsBeforePostCompletion(xml, log);
+      const valuationSpacingResult = normalizeBlankParagraphBeforePostCompletion(xml, log);
       xml = valuationSpacingResult.xml;
       result.valuationBlankParagraphsRemoved = valuationSpacingResult.removed || 0;
-      if (valuationSpacingResult.removed) changed = true;
+      result.valuationBlankParagraphsInserted = valuationSpacingResult.inserted || 0;
+      if (valuationSpacingResult.removed || valuationSpacingResult.inserted) changed = true;
 
       const indentResult = normalizeTopAddressIndent(xml, log, sourceAddressLayout);
       xml = indentResult.xml;
