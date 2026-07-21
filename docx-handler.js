@@ -353,6 +353,32 @@ function collectParagraphXml(xml) {
   return paragraphs;
 }
 
+function collectTopLevelParagraphXml(xml) {
+  const paragraphs = [];
+  const tokenRe = /<w:tbl\b[^>]*>|<\/w:tbl>|<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+  let tableDepth = 0;
+  let match;
+  while ((match = tokenRe.exec(xml)) !== null) {
+    const token = match[0];
+    if (/^<w:tbl\b/i.test(token)) {
+      tableDepth++;
+      continue;
+    }
+    if (/^<\/w:tbl/i.test(token)) {
+      tableDepth = Math.max(0, tableDepth - 1);
+      continue;
+    }
+    if (tableDepth !== 0) continue;
+    paragraphs.push({
+      start: match.index,
+      end: match.index + token.length,
+      xml: token,
+      text: extractParagraphText(token).replace(/\s+/g, ' ').trim()
+    });
+  }
+  return paragraphs;
+}
+
 function looksLikeLetterDate(text) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean || clean.length > 90) return false;
@@ -691,6 +717,90 @@ function removeBlankParagraphsBeforePostCompletion(xml, log) {
   return { xml: out, removed: between.length };
 }
 
+function normalizeLetterBodyBlankParagraphs(xml, log) {
+  const dlog = typeof log === 'function' ? log : (() => {});
+  const paragraphs = collectTopLevelParagraphXml(xml);
+  const greetingIndex = paragraphs.findIndex((paragraph) =>
+    /^(?:To Whom It May Concern|Dear\b.*)[,:]?$/i.test(paragraph.text)
+  );
+  const projectDetailsIndex = paragraphs.findIndex((paragraph) => /^Project Details$/i.test(paragraph.text));
+  const startIndex = greetingIndex >= 0 ? greetingIndex : projectDetailsIndex;
+  if (startIndex < 0) {
+    dlog('[docx-layout] Letter-body spacing check skipped: body start was not found.');
+    return { xml, removed: 0, normalizedGaps: 0, reason: 'letter body start not found' };
+  }
+
+  const signatureIndex = paragraphs.findIndex((paragraph, index) =>
+    index > startIndex && /^Sincerely yours,?$/i.test(paragraph.text)
+  );
+  const endIndex = signatureIndex >= 0 ? signatureIndex : paragraphs.length;
+  const removable = new Set();
+  const details = [];
+
+  const isNormalBodyBlank = (paragraph) =>
+    isEmptyParagraph(paragraph.xml) && !/<w:(?:sectPr|pageBreakBefore)\b/i.test(paragraph.xml);
+  const hasBlockBoundary = (left, right) =>
+    /<w:(?:tbl|sectPr|altChunk)\b/i.test(xml.slice(left.end, right.start));
+
+  for (let index = startIndex + 1; index < endIndex;) {
+    if (!isNormalBodyBlank(paragraphs[index])) {
+      index++;
+      continue;
+    }
+
+    let runEnd = index + 1;
+    while (
+      runEnd < endIndex &&
+      isNormalBodyBlank(paragraphs[runEnd]) &&
+      !hasBlockBoundary(paragraphs[runEnd - 1], paragraphs[runEnd])
+    ) {
+      runEnd++;
+    }
+
+    const previous = paragraphs[index - 1];
+    const next = paragraphs[runEnd];
+    const runLength = runEnd - index;
+    const boundedByBodyText = runEnd < endIndex && previous && previous.text && next && next.text;
+    const crossesBlockBoundary =
+      !previous || !next ||
+      hasBlockBoundary(previous, paragraphs[index]) ||
+      hasBlockBoundary(paragraphs[runEnd - 1], next);
+
+    if (runLength > 1 && boundedByBodyText && !crossesBlockBoundary) {
+      for (let removeIndex = index + 1; removeIndex < runEnd; removeIndex++) {
+        removable.add(removeIndex);
+      }
+      details.push({
+        before: next.text.slice(0, 100),
+        originalBlankParagraphs: runLength,
+        removed: runLength - 1
+      });
+    }
+    index = runEnd;
+  }
+
+  if (!removable.size) {
+    dlog('[docx-layout] Letter-body spacing check found no consecutive blank paragraphs to remove.');
+    return { xml, removed: 0, normalizedGaps: 0, details };
+  }
+
+  let out = '';
+  let cursor = 0;
+  for (let index = 0; index < paragraphs.length; index++) {
+    const paragraph = paragraphs[index];
+    out += xml.slice(cursor, paragraph.start);
+    if (!removable.has(index)) out += paragraph.xml;
+    cursor = paragraph.end;
+  }
+  out += xml.slice(cursor);
+
+  for (const detail of details) {
+    dlog(`[docx-layout] Reduced ${detail.originalBlankParagraphs} blank body paragraphs to 1 before "${detail.before}".`);
+  }
+  dlog(`[docx-layout] Normalized ${details.length} letter-body gap(s); removed ${removable.size} extra blank paragraph(s).`);
+  return { xml: out, removed: removable.size, normalizedGaps: details.length, details };
+}
+
 function setParagraphIndent(paragraphXml, attrs) {
   const attrText = Object.entries(attrs)
     .map(([key, value]) => `w:${key}="${String(value)}"`)
@@ -907,6 +1017,10 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
     sourceTemplateSpacingUsed: !!opts.sourceTemplatePath,
     projectDetailsSpacing: null,
     duplicateAggregateParagraphsRemoved: 0,
+    bodyBlankParagraphsRemoved: 0,
+    bodySpacingNormalizedGaps: 0,
+    bodySpacingDetails: [],
+    bodySpacingReason: null,
     valuationBlankParagraphsRemoved: 0,
     projectDetailsBlankParagraphsRemoved: 0,
     addressIndentParagraphsChanged: 0,
@@ -979,6 +1093,14 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       result.projectDetailsBlankParagraphsRemoved = projectSpacingResult.removed || 0;
       result.projectDetailsBlankParagraphsInserted = projectSpacingResult.inserted || 0;
       if (projectSpacingResult.changedPairs) changed = true;
+
+      const bodySpacingResult = normalizeLetterBodyBlankParagraphs(xml, log);
+      xml = bodySpacingResult.xml;
+      result.bodyBlankParagraphsRemoved = bodySpacingResult.removed || 0;
+      result.bodySpacingNormalizedGaps = bodySpacingResult.normalizedGaps || 0;
+      result.bodySpacingDetails = bodySpacingResult.details || [];
+      result.bodySpacingReason = bodySpacingResult.reason || null;
+      if (bodySpacingResult.removed) changed = true;
 
       const valuationSpacingResult = removeBlankParagraphsBeforePostCompletion(xml, log);
       xml = valuationSpacingResult.xml;
