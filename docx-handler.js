@@ -905,6 +905,8 @@ function normalizeTopAddressIndent(xml, log, profile) {
   let tabNormalized = 0;
   let seenDate = false;
   let addressBlockOpen = false;
+  let addressBlockComplete = false;
+  let paragraphsAfterDate = 0;
   const reIndent = profile && profile.reIndent ? profile.reIndent : { left: '2160', hanging: '1080' };
   const detailIndent = profile && profile.detailIndent ? profile.detailIndent : { left: '2160' };
   const tabStop = profile && profile.tabStop ? profile.tabStop : '2160';
@@ -914,7 +916,15 @@ function normalizeTopAddressIndent(xml, log, profile) {
       seenDate = true;
       return paragraph;
     }
-    if (!seenDate) return paragraph;
+    if (!seenDate || addressBlockComplete) return paragraph;
+    paragraphsAfterDate++;
+    if (!addressBlockOpen && (
+      paragraphsAfterDate > 30 ||
+      /^(?:Opinion Letter|Letter of Opinion|Property Summary\s*:|To Whom It May Concern|Dear\b|Project Details$)/i.test(text)
+    )) {
+      addressBlockComplete = true;
+      return paragraph;
+    }
     if (/^RE\s*:/i.test(text)) {
       addressBlockOpen = true;
       changed++;
@@ -935,7 +945,10 @@ function normalizeTopAddressIndent(xml, log, profile) {
       changed++;
       return setParagraphIndent(paragraph, detailIndent);
     }
-    if (addressBlockOpen && text) addressBlockOpen = false;
+    if (addressBlockOpen && text) {
+      addressBlockOpen = false;
+      addressBlockComplete = true;
+    }
     return paragraph;
   });
   if (changed) {
@@ -945,6 +958,76 @@ function normalizeTopAddressIndent(xml, log, profile) {
     if (tabNormalized) dlog(`[docx-presentation] Replaced ${tabNormalized} top-address text separator(s) with a real Word tab.`);
   }
   return { xml: out, changed, rePrefixNormalized, tabNormalized };
+}
+
+function paragraphIndentAttributes(paragraphXml) {
+  const match = String(paragraphXml || '').match(/<w:ind\b([^>]*?)(?:\/?>)/i);
+  if (!match) return null;
+  const attrs = {};
+  for (const attr of match[1].matchAll(/w:([A-Za-z0-9]+)="([^"]*)"/g)) {
+    attrs[attr[1]] = attr[2];
+  }
+  return Object.keys(attrs).length ? attrs : null;
+}
+
+function removeParagraphIndent(paragraphXml) {
+  return String(paragraphXml || '').replace(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/, (pPr) =>
+    pPr.replace(/<w:ind\b[^>]*(?:\/>|>[\s\S]*?<\/w:ind>)/i, '')
+  );
+}
+
+function removeLeadingRePrefixFromParagraph(paragraphXml) {
+  let removed = false;
+  let out = String(paragraphXml || '').replace(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g, (tag, encodedText) => {
+    if (removed) return tag;
+    const text = decodeXml(encodedText);
+    if (!/^\s*RE\s*:/i.test(text)) return tag;
+    removed = true;
+    const cleaned = text.replace(/^\s*RE\s*:\s*/i, '');
+    return tag.replace(encodedText, escapeXml(cleaned));
+  });
+  if (!removed) return { paragraphXml, removed: false };
+
+  const pPrMatch = out.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/);
+  if (pPrMatch) {
+    const cleanedPPr = pPrMatch[0].replace(/<w:tabs\b[^>]*>[\s\S]*?<\/w:tabs>/i, '');
+    out = out.replace(pPrMatch[0], cleanedPPr);
+  }
+  out = out.replace(/<w:tab\b[^>]*\/>/i, '');
+  return { paragraphXml: out, removed: true };
+}
+
+function repairProjectDetailsRePrefixes(xml, log, fallbackIndent) {
+  const section = projectDetailsNumberedParagraphs(xml);
+  if (!section.numbered.length) return { xml, repaired: 0, details: [] };
+
+  const normalReference = section.numbered.find((paragraph) => !/^RE\s*:/i.test(paragraph.text));
+  const normalIndent = normalReference ? paragraphIndentAttributes(normalReference.xml) : fallbackIndent;
+  const replacements = [];
+  const details = [];
+
+  for (const paragraph of section.numbered) {
+    if (!/^RE\s*:/i.test(paragraph.text)) continue;
+    const prefixResult = removeLeadingRePrefixFromParagraph(paragraph.xml);
+    if (!prefixResult.removed) continue;
+    const replacement = normalIndent
+      ? setParagraphIndent(prefixResult.paragraphXml, normalIndent)
+      : removeParagraphIndent(prefixResult.paragraphXml);
+    replacements.push({ start: paragraph.start, end: paragraph.end, replacement });
+    details.push(paragraph.text.replace(/^RE\s*:\s*/i, '').slice(0, 100));
+  }
+
+  if (!replacements.length) return { xml, repaired: 0, details };
+  let out = xml;
+  for (const replacement of replacements.reverse()) {
+    out = out.slice(0, replacement.start) + replacement.replacement + out.slice(replacement.end);
+  }
+
+  const dlog = typeof log === 'function' ? log : (() => {});
+  for (const detail of details) {
+    dlog(`[docx-layout] Removed stray RE prefix and restored Project Details indentation for "${detail}".`);
+  }
+  return { xml: out, repaired: replacements.length, details };
 }
 
 function removeHighlightMarkup(xml) {
@@ -980,6 +1063,7 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
   const log = typeof opts.log === 'function' ? opts.log : (() => {});
   const zip = new PizZip(fs.readFileSync(filePath));
   let sourceProjectDetailsSpacing = null;
+  let sourceProjectDetailsIndent = null;
   let sourcePropertySummarySpacing = null;
   let sourceAddressLayout = null;
   if (opts.sourceTemplatePath) {
@@ -989,6 +1073,10 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       if (sourceDocument) {
         const sourceXml = sourceDocument.asText();
         sourceProjectDetailsSpacing = projectDetailsSpacingProfile(sourceXml);
+        const sourceProjectDetails = projectDetailsNumberedParagraphs(sourceXml);
+        sourceProjectDetailsIndent = sourceProjectDetails.numbered.length
+          ? paragraphIndentAttributes(sourceProjectDetails.numbered[0].xml)
+          : null;
         sourcePropertySummarySpacing = blankSpacingProfileAfter(
           sourceXml,
           (text) => /^Property Summary\s*:/i.test(text)
@@ -1021,6 +1109,8 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
     bodySpacingNormalizedGaps: 0,
     bodySpacingDetails: [],
     bodySpacingReason: null,
+    projectDetailsRePrefixesRepaired: 0,
+    projectDetailsRePrefixDetails: [],
     valuationBlankParagraphsRemoved: 0,
     projectDetailsBlankParagraphsRemoved: 0,
     addressIndentParagraphsChanged: 0,
@@ -1093,6 +1183,12 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
       result.projectDetailsBlankParagraphsRemoved = projectSpacingResult.removed || 0;
       result.projectDetailsBlankParagraphsInserted = projectSpacingResult.inserted || 0;
       if (projectSpacingResult.changedPairs) changed = true;
+
+      const projectDetailsReResult = repairProjectDetailsRePrefixes(xml, log, sourceProjectDetailsIndent);
+      xml = projectDetailsReResult.xml;
+      result.projectDetailsRePrefixesRepaired = projectDetailsReResult.repaired || 0;
+      result.projectDetailsRePrefixDetails = projectDetailsReResult.details || [];
+      if (projectDetailsReResult.repaired) changed = true;
 
       const bodySpacingResult = normalizeLetterBodyBlankParagraphs(xml, log);
       xml = bodySpacingResult.xml;

@@ -330,7 +330,17 @@ function aiAnswersText(fields) {
     getField(fields, 'AI Answer') ??
     getField(fields, 'AI answers') ??
     getField(fields, 'AI answer');
-  return asString(raw).replace(/\s+/g, ' ').trim();
+  return asString(raw)
+    .split(/\r?\n/)
+    .map((line) => line
+      .replace(/^\s*\d+[\).:\-\s]+/, '')
+      .replace(/^\s*RE\s*:\s*/i, '')
+      .replace(/^\s*\d+[\).:\-\s]+/, '')
+      .trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function synthesizeProjectDetails(fields, projectFacts) {

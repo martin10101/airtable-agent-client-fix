@@ -309,7 +309,11 @@ function aiAnswersText(fields) {
     getField(fields, 'AI answer');
   const lines = asString(raw)
     .split(/\r?\n/)
-    .map((line) => line.replace(/^\s*\d+[\).:\-\s]+/, '').trim())
+    .map((line) => line
+      .replace(/^\s*\d+[\).:\-\s]+/, '')
+      .replace(/^\s*RE\s*:\s*/i, '')
+      .replace(/^\s*\d+[\).:\-\s]+/, '')
+      .trim())
     .filter(Boolean);
   return lines.join(' ').replace(/\s+/g, ' ').trim();
 }
