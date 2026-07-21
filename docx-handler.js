@@ -1059,6 +1059,111 @@ function removeRedBodyColorMarkup(xml) {
   return { xml: out, removed };
 }
 
+function removeCommentMarkup(xml) {
+  let commentRangesRemoved = 0;
+  let commentReferencesRemoved = 0;
+  let commentRunsRemoved = 0;
+  let out = String(xml || '');
+
+  // A comment reference normally lives in its own formatting-only run. Remove
+  // that run so it cannot leave an empty marker in the rendered paragraph.
+  out = out.replace(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g, (run) => {
+    if (!/<w:commentReference\b/.test(run)) return run;
+    const hasVisibleContent = /<w:(?:t|tab|br|drawing|object|instrText|sym)\b/.test(run);
+    if (hasVisibleContent) {
+      return run.replace(/<w:commentReference\b[^>]*(?:\/>|>[\s\S]*?<\/w:commentReference>)/g, () => {
+        commentReferencesRemoved++;
+        return '';
+      });
+    }
+    commentReferencesRemoved += (run.match(/<w:commentReference\b/g) || []).length;
+    commentRunsRemoved++;
+    return '';
+  });
+
+  out = out
+    .replace(/<w:commentRangeStart\b[^>]*(?:\/>|>[\s\S]*?<\/w:commentRangeStart>)/g, () => {
+      commentRangesRemoved++;
+      return '';
+    })
+    .replace(/<w:commentRangeEnd\b[^>]*(?:\/>|>[\s\S]*?<\/w:commentRangeEnd>)/g, () => {
+      commentRangesRemoved++;
+      return '';
+    });
+
+  return { xml: out, commentRangesRemoved, commentReferencesRemoved, commentRunsRemoved };
+}
+
+function removeDocxComments(zip, log) {
+  const result = {
+    commentRangesRemoved: 0,
+    commentReferencesRemoved: 0,
+    commentRunsRemoved: 0,
+    commentPartsRemoved: 0,
+    commentRelationshipsRemoved: 0,
+    commentContentTypesRemoved: 0,
+    touchedParts: []
+  };
+
+  for (const name of Object.keys(zip.files)) {
+    const entry = zip.files[name];
+    if (!entry || entry.dir || !/^word\/(?!comments).*\.xml$/i.test(name)) continue;
+    const xml = entry.asText();
+    if (!/<w:comment(?:RangeStart|RangeEnd|Reference)\b/.test(xml)) continue;
+    const cleaned = removeCommentMarkup(xml);
+    zip.file(name, cleaned.xml);
+    result.commentRangesRemoved += cleaned.commentRangesRemoved;
+    result.commentReferencesRemoved += cleaned.commentReferencesRemoved;
+    result.commentRunsRemoved += cleaned.commentRunsRemoved;
+    result.touchedParts.push(name);
+  }
+
+  for (const name of Object.keys(zip.files)) {
+    if (!/^word\/(?:comments[^/]*|people)\.xml$/i.test(name) &&
+        !/^word\/_rels\/(?:comments[^/]*|people)\.xml\.rels$/i.test(name)) continue;
+    zip.remove(name);
+    result.commentPartsRemoved++;
+  }
+
+  const relsName = 'word/_rels/document.xml.rels';
+  const relsFile = zip.file(relsName);
+  if (relsFile) {
+    let rels = relsFile.asText();
+    rels = rels.replace(/<Relationship\b[^>]*(?:Type="[^"]*\/(?:comments(?:Extended|Ids|Extensible)?|people)"|Target="(?:comments[^"/]*|people)\.xml")[^>]*\/>/gi, () => {
+      result.commentRelationshipsRemoved++;
+      return '';
+    });
+    if (result.commentRelationshipsRemoved) {
+      zip.file(relsName, rels);
+      result.touchedParts.push(relsName);
+    }
+  }
+
+  const contentTypesName = '[Content_Types].xml';
+  const contentTypesFile = zip.file(contentTypesName);
+  if (contentTypesFile) {
+    let contentTypes = contentTypesFile.asText();
+    contentTypes = contentTypes.replace(/<Override\b[^>]*PartName="\/word\/(?:comments[^"/]*|people)\.xml"[^>]*\/>/gi, () => {
+      result.commentContentTypesRemoved++;
+      return '';
+    });
+    if (result.commentContentTypesRemoved) {
+      zip.file(contentTypesName, contentTypes);
+      result.touchedParts.push(contentTypesName);
+    }
+  }
+
+  const totalRemoved = result.commentRangesRemoved + result.commentReferencesRemoved +
+    result.commentPartsRemoved + result.commentRelationshipsRemoved + result.commentContentTypesRemoved;
+  const dlog = typeof log === 'function' ? log : (() => {});
+  if (totalRemoved) {
+    dlog(`[docx-presentation] Removed Word comments: ${result.commentRangesRemoved} range marker(s), ${result.commentReferencesRemoved} reference(s), and ${result.commentPartsRemoved} comment part(s).`);
+  } else {
+    dlog('[docx-presentation] No Word comments found to remove.');
+  }
+  return result;
+}
+
 function applyFinalDocxPresentation(filePath, opts = {}) {
   const log = typeof opts.log === 'function' ? opts.log : (() => {});
   const zip = new PizZip(fs.readFileSync(filePath));
@@ -1118,8 +1223,14 @@ function applyFinalDocxPresentation(filePath, opts = {}) {
     topAddressTabsNormalized: 0,
     removedRedColorTags: 0,
     removedHighlights: 0,
+    comments: null,
     touchedParts: []
   };
+
+  if (opts.removeComments !== false) {
+    result.comments = removeDocxComments(zip, log);
+    result.touchedParts.push(...result.comments.touchedParts);
+  }
 
   for (const name of DOCX_TEXT_TARGETS) {
     const file = zip.file(name);
